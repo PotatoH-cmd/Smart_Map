@@ -1,0 +1,5 @@
+{
+  "dependencies": {
+    "esri-leaflet": "^3.0.19"
+  }
+}
