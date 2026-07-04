@@ -79,33 +79,33 @@ yarn-error.log*
 *.doc
 
 # Exceptions: template files needed by the application
-!map_assistant_v1/backend/templates/report_template.docx
+!backend/templates/report_template.docx
 
 # ============================================================
 # Generated / build output
 # ============================================================
-map_assistant_v1/frontend/build/
+frontend/build/
 
 # ============================================================
 # Generated data directories
 # ============================================================
-map_assistant_v1/backend/.gis_logs/
-map_assistant_v1/backend/llama_index_storage/
-map_assistant_v1/backend/vector_tiles/
-map_assistant_v1/backend/3dtiles_data/
-map_assistant_v1/backend/drone_imagery/
-map_assistant_v1/backend/static/geojson/
-map_assistant_v1/backend/static/screenshots/
-map_assistant_v1/frontend/public/data/
-map_assistant_v1/frontend/node_modules/.cache/
-map_assistant_v1/backend/workspace/
-map_assistant_v1/deploy/geoserver_data/
-map_assistant_v1/dify_md_output/
-map_assistant_v1/images/
-map_assistant_v1/workspace/
+backend/.gis_logs/
+backend/llama_index_storage/
+backend/vector_tiles/
+backend/3dtiles_data/
+backend/drone_imagery/
+backend/static/geojson/
+backend/static/screenshots/
+frontend/public/data/
+frontend/node_modules/.cache/
+backend/workspace/
+deploy/geoserver_data/
+dify_md_output/
+images/
+workspace/
 
 # Accidental files
-map_assistant_v1/backend/=*
+backend/=*
 
 # ============================================================
 # Other project directories (not map_assistant_v1)
