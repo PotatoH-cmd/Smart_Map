@@ -8,6 +8,7 @@ import re
 from typing import Dict, List, Any, Optional, Union
 from qwen_agent.tools.base import BaseTool, register_tool
 from decimal import Decimal  # 在文件顶部添加
+from .schema_manager import SchemaManager
 try:
     import psycopg2
     from psycopg2.extras import RealDictCursor
@@ -153,28 +154,11 @@ class PostgreSQLTool(BaseTool):
             }
 
     def _load_schema_cache(self) -> Dict[str, Any]:
+        """委托给集中式 SchemaManager 单例。"""
         if self._schema_cache is not None:
             return self._schema_cache
-        self._schema_cache = {"columns": [], "case_sensitive": [], "lower_map": {}}
-        try:
-            current_dir = os.path.dirname(os.path.abspath(__file__))
-            base_dir = os.path.dirname(current_dir)
-            json_path = os.path.join(base_dir, 'config', 'db_schema.json')
-            if not os.path.exists(json_path):
-                return self._schema_cache
-            with open(json_path, 'r', encoding='utf-8') as f:
-                schema = json.load(f)
-            columns = []
-            for cols in schema.values():
-                for col in cols:
-                    col_name = col.split(" (", 1)[0].strip()
-                    if col_name:
-                        columns.append(col_name)
-            lower_map = {c.lower(): c for c in columns}
-            case_sensitive = [c for c in columns if any(ch.isupper() for ch in c)]
-            self._schema_cache = {"columns": columns, "case_sensitive": case_sensitive, "lower_map": lower_map}
-        except Exception:
-            self._schema_cache = {"columns": [], "case_sensitive": [], "lower_map": {}}
+        sm = SchemaManager.instance(self.cfg)
+        self._schema_cache = sm.get_column_cache()
         return self._schema_cache
 
     def _auto_quote_sql(self, sql: str) -> str:
@@ -206,18 +190,21 @@ class PostgreSQLTool(BaseTool):
                         sql = self._auto_quote_sql(sql)
                         cur.execute(sql, params)
                         
-                        MAX_ROWS_FOR_AGENT = 20
+                        # 返回全部数据，让下游（报告/可视化/统计）基于完整数据集计算。
+                        # 防止 token 爆炸的截断已在下游各自完成：
+                        #   - response_node 的 tool_summaries 仅取 data[:10]
+                        #   - report_builder 的 raw_rows 仅取 rows[:200] 给 LLM 看，统计基于全量
                         rows_all = cur.fetchall()
                         results = []
-                        for row in rows_all[:MAX_ROWS_FOR_AGENT]:
+                        for row in rows_all:
                             d = dict(row)
                             for k, v in d.items():
                                 if isinstance(v, Decimal):
                                     d[k] = float(v)
                             results.append(d)
-                        message = f'查询成功，返回 {len(results)} 条记录进行预览。'
-                        if len(rows_all) > MAX_ROWS_FOR_AGENT:
-                            message += f' 注意：实际查询结果超过 {MAX_ROWS_FOR_AGENT} 条，为了性能仅展示前 {MAX_ROWS_FOR_AGENT} 条。若需在地图上查看全部数据，请务必使用 map_tool 的 load_vector_layer 操作。'
+
+                        total_count = len(results)
+                        message = f'查询成功，返回 {total_count} 条记录。（已返回全部）'
                             
                         return {
                             'success': True,
@@ -235,6 +222,13 @@ class PostgreSQLTool(BaseTool):
                         self.conn.rollback()
                     except:
                         pass
+                err_text = str(e)
+                # 若字段不存在，刷新 schema 缓存后重试一次（用于大小写字段自动纠正）
+                if attempt == 0 and ('does not exist' in err_text.lower()) and ('column' in err_text.lower()):
+                    logger.warning(f"Query failed with undefined column, refreshing schema cache and retrying once: {err_text}")
+                    self._schema_cache = None
+                    SchemaManager.instance(self.cfg).refresh()
+                    continue
                 return {'success': False, 'error': f'查询失败: {str(e)}', 'data': None}
         
         return {'success': False, 'error': '数据库连接持续异常，请检查数据库服务状态', 'data': None}
@@ -304,66 +298,32 @@ class PostgreSQLTool(BaseTool):
         return {'success': False, 'error': '数据库连接持续异常，请检查数据库服务状态', 'data': None}
 
     def _get_db_schema(self) -> Dict[str, Any]:
-        """获取数据库所有表的详细 Schema 信息，用于 Text-to-SQL"""
-        for attempt in range(2):
-            try:
-                if self.conn is None or self.conn.closed:
-                    self._connect()
-                
-                if self.conn:
-                    with self.conn.cursor() as cur:
-                        # 获取所有表及其列信息
-                        cur.execute("""
-                            SELECT 
-                                t.table_name,
-                                c.column_name,
-                                c.data_type,
-                                c.is_nullable,
-                                pg_catalog.col_description(format('%I.%I', t.table_schema, t.table_name)::regclass::oid, c.ordinal_position) as column_comment
-                            FROM 
-                                information_schema.tables t
-                            JOIN 
-                                information_schema.columns c ON t.table_name = c.table_name AND t.table_schema = c.table_schema
-                            WHERE 
-                                t.table_schema = 'public'
-                                AND t.table_type = 'BASE TABLE'
-                            ORDER BY 
-                                t.table_name, c.ordinal_position;
-                        """)
-                        
-                        rows = cur.fetchall()
-                        schema_dict = {}
-                        for row in rows:
-                            table_name = row['table_name']
-                            if table_name not in schema_dict:
-                                schema_dict[table_name] = []
-                            
-                            col_info = f"{row['column_name']} ({row['data_type']})"
-                            if row['column_comment']:
-                                col_info += f" -- {row['column_comment']}"
-                            schema_dict[table_name].append(col_info)
-                        
-                        # 格式化输出为字符串
-                        schema_text = "当前数据库公开表结构如下：\n"
-                        for table, cols in schema_dict.items():
-                            schema_text += f"\n表名: {table}\n字段:\n  - " + "\n  - ".join(cols) + "\n"
-                        
-                        return {
-                            'success': True,
-                            'data': {'schema': schema_dict, 'formatted_schema': schema_text},
-                            'message': '数据库 Schema 获取成功'
-                        }
-            except (psycopg2.OperationalError, psycopg2.InterfaceError) as e:
-                logger.warning(f"Database connection issue in get_db_schema on attempt {attempt + 1}: {e}")
-                self._connect()
-            except Exception as e:
-                logger.error(f"Get DB schema failed: {e}")
+        """获取数据库所有表的详细 Schema 信息，用于 Text-to-SQL。
+        委托给集中式 SchemaManager 单例。"""
+        try:
+            sm = SchemaManager.instance(self.cfg)
+            schema_dict = sm.get_schema_dict()
+            formatted = sm.get_formatted_schema()
+            if schema_dict:
                 return {
-                    'success': False,
-                    'error': f'获取数据库结构失败: {str(e)}',
-                    'data': None
+                    'success': True,
+                    'data': {'schema': schema_dict, 'formatted_schema': formatted},
+                    'message': '数据库 Schema 获取成功'
                 }
-        return {'success': False, 'error': '数据库连接持续异常，请检查数据库服务状态', 'data': None}
+            # 缓存为空，尝试刷新一次
+            sm.refresh()
+            schema_dict = sm.get_schema_dict()
+            formatted = sm.get_formatted_schema()
+            if schema_dict:
+                return {
+                    'success': True,
+                    'data': {'schema': schema_dict, 'formatted_schema': formatted},
+                    'message': '数据库 Schema 获取成功'
+                }
+            return {'success': False, 'error': '获取数据库结构失败：Schema 为空', 'data': None}
+        except Exception as e:
+            logger.error(f"Get DB schema failed: {e}")
+            return {'success': False, 'error': f'获取数据库结构失败: {str(e)}', 'data': None}
 
     def _sync_schema_to_file(self) -> Dict[str, Any]:
         """将数据库 Schema 同步到本地 JSON 和 Markdown 文件中"""

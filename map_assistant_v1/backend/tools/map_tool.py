@@ -70,7 +70,7 @@ class MapTool(BaseTool):
             'name': 'layer',
             'type': 'string',
             'description': '图层类型',
-            'enum': ['satellite', 'osm'],
+            'enum': ['arcgis', 'jcdt', 'gf2024', 'gf2025'],
             'required': False
         },
         {
@@ -240,12 +240,13 @@ class MapTool(BaseTool):
                 }
 
             elif action == 'switch_layer':
-                layer = params.get('layer', 'osm')
-                if layer not in ['osm', 'satellite']:
-                    return {'success': False, 'error': 'layer 必须是 osm 或 satellite', 'map_command': None}
+                layer = params.get('layer', 'arcgis')
+                if layer not in ['arcgis', 'jcdt', 'gf2024', 'gf2025']:
+                    return {'success': False, 'error': '当前仅支持 arcgis/jcdt/gf2024/gf2025 底图', 'map_command': None}
+                layer_names = {'arcgis': '2023年高分影像', 'jcdt': '基础底图', 'gf2024': '2024年高分影像', 'gf2025': '2025年高分影像'}
                 return {
                     'success': True,
-                    'message': f'切换到底图: {layer}',
+                    'message': f'切换到底图: {layer_names.get(layer, layer)}',
                     'map_command': {'type': 'switch_layer', 'layer': layer}
                 }
 

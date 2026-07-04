@@ -13,6 +13,7 @@ class IntentType(str, Enum):
     LOCATION_SEARCH = "location_search"
     COORDINATE_MARKER = "coordinate_marker"
     WEATHER_QUERY = "weather_query"
+    SPATIAL_PROCESSING = "spatial_processing"  # 空间数据处理（坐标转换、矢量生成）
     UNKNOWN = "unknown"
 
 
@@ -71,6 +72,7 @@ INTENT_DESCRIPTIONS = {
     IntentType.REPORT_GENERATION: "报告生成任务：生成正式报告、导出文档",
     IntentType.LOCATION_SEARCH: "位置搜索任务：查找地点坐标、地址搜索",
     IntentType.COORDINATE_MARKER: "坐标标注任务：在地图上标注特定坐标点",
+    IntentType.SPATIAL_PROCESSING: "空间数据处理任务：坐标投影转换、XY交换、矢量GeoJSON生成与地图加载",
     IntentType.CROSS_INTENT: "跨意图复合任务：涉及多种操作类型的复杂任务",
     IntentType.UNKNOWN: "未知意图：无法明确分类的任务",
 }
@@ -78,6 +80,7 @@ INTENT_DESCRIPTIONS = {
 
 TOOL_INTENT_MAPPING = {
     "map_tool": [IntentType.MAP_DISPLAY, IntentType.LOCATION_SEARCH, IntentType.COORDINATE_MARKER],
+    "cesium_tool": [IntentType.MAP_DISPLAY],  # 3D地图操作
     "location_search": [IntentType.LOCATION_SEARCH],
     "coordinate_marker": [IntentType.COORDINATE_MARKER],
     "postgresql_tool": [IntentType.DATA_QUERY],
@@ -85,4 +88,5 @@ TOOL_INTENT_MAPPING = {
     "data_visualizer_tool": [IntentType.DATA_VISUALIZATION],
     "report_generator_tool": [IntentType.REPORT_GENERATION],
     "weather_tool": [IntentType.WEATHER_QUERY],
+    "spatial_processing_tool": [IntentType.SPATIAL_PROCESSING],
 }

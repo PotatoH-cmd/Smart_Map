@@ -37,12 +37,13 @@ class CesiumTool(BaseTool):
                 '  addGeoJsonLayer - 从后端API加载GeoJSON矢量图层（需要table_name）\n'
                 '  removeLayer - 移除指定图层（需要name）\n'
                 '  clearAll - 清除3D地图上所有实体和图层\n'
-                '  setBasemap - 切换底图（satellite/osm/tianditu）\n'
+                '  setBasemap - 切换底图（satellite/osm/tianditu/jcdt/gf2024/gf2025）\n'
                 '  setView - 直接设置相机视角（需要lat/lng/height）\n'
                 '  screenshot - 截取当前3D地图截图\n'
                 '  addPolygon - 在3D地图上绘制多边形（需要coordinates）\n'
                 '  addPolyline - 在3D地图上绘制折线（需要coordinates）\n'
                 '  addHeatmap - 添加热力图（需要points数据）\n'
+                '  addDepthColumns - 加载测深点3D风险柱。若用户指定了采区名称（如"种子场可采区"），必须传filter参数过滤，格式："Mineable_Area_Name"=\'采区名\'；不指定则加载全部\n'
                 '  load3dTiles - 加载3D Tiles倾斜摄影/建筑（需要url）\n'
                 '  loadTerrain - 加载地形服务（需要url）'
             ),
@@ -50,7 +51,7 @@ class CesiumTool(BaseTool):
                 'flyTo', 'addMarker', 'addGeoJsonLayer', 'removeLayer',
                 'clearAll', 'setBasemap', 'setView', 'screenshot',
                 'addPolygon', 'addPolyline', 'addHeatmap',
-                'load3dTiles', 'loadTerrain'
+                'addDepthColumns', 'load3dTiles', 'loadTerrain'
             ],
             'required': True
         },
@@ -121,10 +122,17 @@ class CesiumTool(BaseTool):
             'required': False
         },
         {
+            'name': 'preset',
+            'type': 'string',
+            'description': '3DTiles预置示例：qx-dyt（大云台倾斜影像）或 qx-simiao（四庙倾斜影像）',
+            'enum': ['qx-dyt', 'qx-simiao'],
+            'required': False
+        },
+        {
             'name': 'basemap',
             'type': 'string',
-            'description': '底图类型：satellite（Esri卫星）、osm（OpenStreetMap）、tianditu（天地图）',
-            'enum': ['satellite', 'osm', 'tianditu'],
+            'description': '底图类型：satellite（Esri卫星）、osm（OpenStreetMap）、tianditu（天地图）、jcdt（基础底图）、gf2024（2024年高分影像）、gf2025（2025年高分影像）',
+            'enum': ['satellite', 'osm', 'tianditu', 'jcdt', 'gf2024', 'gf2025'],
             'required': False
         },
         {
@@ -143,6 +151,18 @@ class CesiumTool(BaseTool):
             'name': 'duration',
             'type': 'number',
             'description': 'flyTo 飞行动画时长（秒），默认 3',
+            'required': False
+        },
+        {
+            'name': 'threshold',
+            'type': 'number',
+            'description': '测深风险阈值（米），addDepthColumns 使用，默认 2',
+            'required': False
+        },
+        {
+            'name': 'height_scale',
+            'type': 'number',
+            'description': '测深风险柱高度缩放倍数，addDepthColumns 使用，默认 45',
             'required': False
         }
     ]
@@ -280,10 +300,10 @@ class CesiumTool(BaseTool):
             # ===== setBasemap：切换底图 =====
             elif action == 'setBasemap':
                 basemap = params.get('basemap', 'satellite')
-                if basemap not in ['satellite', 'osm', 'tianditu']:
+                if basemap not in ['satellite', 'osm', 'tianditu', 'jcdt', 'gf2024', 'gf2025']:
                     return {
                         'success': False,
-                        'error': 'basemap 必须是 satellite/osm/tianditu',
+                        'error': 'basemap 必须是 satellite/osm/tianditu/jcdt/gf2024/gf2025',
                         'cesium_command': None
                     }
                 return {
@@ -343,18 +363,91 @@ class CesiumTool(BaseTool):
                     }
                 }
 
+            # ===== addDepthColumns：加载测深点3D风险柱 =====
+            elif action == 'addDepthColumns':
+                table_name = params.get('table_name', 'ceshen')
+                layer_name = params.get('name') or params.get('title') or '测深风险柱'
+                geom_col = params.get('geom_col', 'geom')
+                filter_query = params.get('filter', '')
+                threshold = params.get('threshold', 2)
+                height_scale = params.get('height_scale', 45)
+                properties = (
+                    'Mineable_Area_Name,County_District,Measured_Depth,'
+                    'Control_Elevation,Lon_4326,Lat_4326,Year,Mineable_Area_ID'
+                )
+
+                # 兜底：若 LLM 忘传 filter 但 name/title 里含"可采区"，自动提取并补 filter
+                if not filter_query:
+                    area_match = re.search(r'([\u4e00-\u9fa5a-zA-Z0-9_]+可采区)', layer_name)
+                    if area_match:
+                        area_name = area_match.group(1)
+                        filter_query = f'"Mineable_Area_Name"=\'{area_name}\''
+                        logger.info(f'[CesiumTool] 自动补充 filter: {filter_query}')
+
+                # 从 filter 回填 layer_name
+                if filter_query and (not layer_name or layer_name == '测深风险柱'):
+                    name_match = re.search(
+                        r'"Mineable_Area_Name"\s*=\s*\'([^\']+)\'', filter_query
+                    )
+                    if name_match:
+                        layer_name = f"{name_match.group(1).strip()}测深风险柱"
+
+                api_url = (
+                    f"/api/vector-data?table_name={urllib.parse.quote(table_name)}"
+                    f"&geom_col={urllib.parse.quote(geom_col)}"
+                    f"&properties={urllib.parse.quote(properties)}&debug=true"
+                )
+                if filter_query:
+                    api_url += f"&filter={urllib.parse.quote(filter_query)}"
+
+                return {
+                    'success': True,
+                    'message': f'在3D地图加载测深风险柱: {layer_name}',
+                    'cesium_command': {
+                        'type': 'addDepthColumns',
+                        'url': api_url,
+                        'name': layer_name,
+                        'threshold': threshold,
+                        'heightScale': height_scale
+                    }
+                }
+
             # ===== load3dTiles：加载3D Tiles =====
             elif action == 'load3dTiles':
-                url = params.get('url')
+                presets = {
+                    'qx-dyt': {
+                        'url': 'http://data.mars3d.cn/3dtiles/qx-dyt/tileset.json',
+                        'name': '大云台倾斜影像',
+                        'altOffset': 0,
+                        'center': None,
+                    },
+                    'qx-simiao': {
+                        'url': 'http://data.mars3d.cn/3dtiles/qx-simiao/tileset.json',
+                        'name': '四庙倾斜影像',
+                        'altOffset': 0,
+                        'center': None,
+                    },
+                }
+                preset_key = params.get('preset')
+                preset_cfg = presets.get(preset_key, {}) if preset_key else {}
+                url = params.get('url') or preset_cfg.get('url')
                 if not url:
-                    return {'success': False, 'error': '缺少 url 参数', 'cesium_command': None}
+                    return {'success': False, 'error': '缺少 url 参数或有效 preset', 'cesium_command': None}
                 return {
                     'success': True,
                     'message': f'加载3D Tiles: {url}',
                     'cesium_command': {
                         'type': 'load3dTiles',
+                        'preset': preset_key,
                         'url': url,
-                        'name': params.get('name', '3D Tiles')
+                        'name': params.get('name') or preset_cfg.get('name') or '3D Tiles',
+                        'altOffset': params.get('altOffset', preset_cfg.get('altOffset', 0)),
+                        'center': params.get('center', preset_cfg.get('center')),
+                        'flyTo': params.get('flyTo', True),
+                        'maximumScreenSpaceError': params.get('maximumScreenSpaceError', 8),
+                        'dynamicScreenSpaceError': params.get('dynamicScreenSpaceError', True),
+                        'foveatedScreenSpaceError': params.get('foveatedScreenSpaceError', True),
+                        'maximumCacheOverflowBytes': params.get('maximumCacheOverflowBytes', 512 * 1024 * 1024)
                     }
                 }
 

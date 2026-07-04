@@ -103,6 +103,7 @@ pdfminer.six==20250327
 pdfplumber==0.11.6
 pexpect==4.9.0
 pillow==11.2.1
+pyproj==3.7.1
 platformdirs==4.3.8
 prometheus_client==0.22.1
 prompt_toolkit==3.0.51
@@ -127,7 +128,13 @@ python-pptx==1.0.2
 pytz==2025.2
 PyYAML==6.0.2
 pyzmq==26.4.0
+# qwen-agent 保留：tools/ 目录下所有工具类均继承自 qwen_agent.tools.base.BaseTool，
+# 迁移 Agent 编排层至 LangGraph 后仍需此依赖，暂不改动工具代码。
 qwen-agent==0.0.26
+# ── LangGraph / LangChain 新增依赖（Agent 编排层迁移至 LangGraph）──
+langgraph>=0.2.0
+langchain>=0.3.0
+langchain-openai>=0.2.0
 rank-bm25==0.2.2
 referencing==0.36.2
 regex==2024.11.6
@@ -174,3 +181,7 @@ websockets==15.0.1
 widgetsnbextension==4.0.14
 XlsxWriter==3.2.3
 yarl==1.20.0
+
+# ── LlamaIndex 知识库依赖 ──
+llama-index>=0.12.0
+llama-index-embeddings-dashscope>=0.3.0

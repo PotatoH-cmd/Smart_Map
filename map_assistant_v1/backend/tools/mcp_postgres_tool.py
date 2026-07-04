@@ -190,11 +190,13 @@ class MCPPostgreSQLTool(BaseTool):
             if isinstance(data, str):
                 data = json.loads(data)
 
-            MAX_ROWS = 20
+            MAX_ROWS = 500  # 原20条太少，导致LLM建议"加载更多"
             preview = data[:MAX_ROWS] if isinstance(data, list) else data
-            message = f'查询成功，返回 {len(data)} 条记录。'
-            if len(data) > MAX_ROWS:
-                message += f' 仅展示前 {MAX_ROWS} 条。'
+            total = len(data) if isinstance(data, list) else 0
+            message = f'查询成功，返回 {len(preview)} 条记录。' + (
+                '' if total <= MAX_ROWS else 
+                f'（共{total}条，返回前{MAX_ROWS}条用于分析）'
+            )
 
             return {
                 'success': True,

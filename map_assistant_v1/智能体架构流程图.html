@@ -1,0 +1,241 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>map_assistant_v1 智能体架构流程图（PPT素材）</title>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: #fff; font-family: 'Microsoft YaHei', 'PingFang SC', sans-serif; padding: 40px 60px; }
+  .diagram-section {
+    margin-bottom: 80px;
+    page-break-inside: avoid;
+  }
+  .diagram-title {
+    font-size: 26px;
+    font-weight: 700;
+    color: #1a1a2e;
+    margin-bottom: 8px;
+    padding-left: 16px;
+    border-left: 5px solid #0f3460;
+  }
+  .diagram-subtitle {
+    font-size: 14px;
+    color: #666;
+    margin-bottom: 24px;
+    padding-left: 21px;
+  }
+  .mermaid {
+    display: flex;
+    justify-content: center;
+    background: #fff;
+    padding: 20px;
+    border: 1px solid #e8e8e8;
+    border-radius: 8px;
+  }
+  .divider {
+    border: none;
+    border-top: 2px dashed #ddd;
+    margin: 60px 0;
+  }
+  @media print {
+    .diagram-section { page-break-after: always; }
+  }
+</style>
+</head>
+<body>
+
+<!-- ==================== 图1: 系统总体架构 ==================== -->
+<div class="diagram-section">
+  <div class="diagram-title">图1 系统总体架构 — 三阶段流水线</div>
+  <div class="diagram-subtitle">intent_node → tool_node → response_node，意图识别与工具执行完全解耦</div>
+  <div class="mermaid">
+%%{init: {'theme': 'base', 'themeVariables': {'fontSize': '16px'}}}%%
+flowchart LR
+    U["👤 用户输入\n自然语言消息"] --> IN
+
+    subgraph intent_node["① intent_node 意图识别"]
+        direction TB
+        IN["IntentAgent"] --> IA["LangChain\nwith_structured_output\n→ IntentResult"]
+    end
+
+    intent_node --> TN
+
+    subgraph tool_node["② tool_node 工具编排"]
+        direction TB
+        TA["QwenToolAdapter"] --> TP["11 工具适配器\nasyncio.gather 并行"]
+    end
+
+    tool_node --> RN
+
+    subgraph response_node["③ response_node 结果汇总"]
+        direction TB
+        RS["LLM 汇总\nChatOpenAI"] --> RO["生成回复文本\n+ map_commands\n+ charts + report_url"]
+    end
+
+    response_node --> FE["🖥️ 前端展示\n文本 + 地图操作 + 图表"]
+  </div>
+</div>
+
+<hr class="divider">
+
+<!-- ==================== 图2: LangGraph 条件路由 ==================== -->
+<div class="diagram-section">
+  <div class="diagram-title">图2 LangGraph 条件路由决策树</div>
+  <div class="diagram-subtitle">_route_after_intent 根据置信度、确认需求、工具需求三级路由</div>
+  <div class="mermaid">
+%%{init: {'theme': 'base', 'themeVariables': {'fontSize': '15px'}}}%%
+flowchart TD
+    START(["初始状态\nAgentState"]) --> INTENT["intent_node\n调用 IntentAgent.analyze()\n产出 IntentResult"]
+
+    INTENT --> ROUTE{"_route_after_intent\n条件路由"}
+
+    ROUTE -->|"confidence < 0.3"| END1(["END\n兜底回复\n'抱歉，我暂时无法理解...'"])
+
+    ROUTE -->|"requires_confirmation = true"| RESP1["response_node\n生成确认文本\n'您是想查询...吗？'"]
+    RESP1 --> END2(["END"])
+
+    ROUTE -->|"无工具需求\n(纯知识问答)"| RESP2["response_node\nLLM 直接回答"]
+    RESP2 --> END3(["END"])
+
+    ROUTE -->|"有工具需求\n(execution_plan 非空)"| TOOL["tool_node\n并行执行工具调用\nasyncio.gather"]
+
+    TOOL --> RESP3["response_node\n结果汇总 + 智能透传"]
+    RESP3 --> END4(["END"])
+  </div>
+</div>
+
+<hr class="divider">
+
+<!-- ==================== 图3: 工具体系全景 ==================== -->
+<div class="diagram-section">
+  <div class="diagram-title">图3 工具体系全景 — 11 工具 × 7 意图映射</div>
+  <div class="diagram-subtitle">TaskExecutor 按意图类型分发至对应工具，支持跨意图组合（cross_intent）</div>
+  <div class="mermaid">
+%%{init: {'theme': 'base', 'themeVariables': {'fontSize': '14px'}}}%%
+flowchart TD
+    TE["⚙️ TaskExecutor\nLangGraph 编排器"]
+
+    TE --> MD["🗺️ map_display\n地图展示"]
+    TE --> DQ["📊 data_query\n数据查询"]
+    TE --> KS["📚 knowledge_search\n知识检索"]
+    TE --> DV["📈 data_visualization\n数据可视化"]
+    TE --> RG["📄 report_generation\n报告生成"]
+    TE --> WQ["🌤️ weather_query\n天气查询"]
+    TE --> SP["📐 spatial_processing\n空间处理"]
+
+    MD --> MT["map_tool\n2D Leaflet"]
+    MD --> CT["cesium_tool\n3D Cesium"]
+    MD --> LS["location_search\n地名→坐标"]
+    MD --> CM["coordinate_marker\n地图打点"]
+
+    DQ --> PT["postgresql_tool\nSQL 查询"]
+    DQ --> MCP["mcp_postgres_tool\n只读 MCP"]
+
+    KS --> KB["knowledge_base_tool\nRAGFlow 检索"]
+
+    DV --> DVT["data_visualizer_tool\nSQL→ECharts"]
+
+    RG --> RGT["report_generator_tool\nWord 模板渲染"]
+
+    WQ --> WT["weather_tool\n天气 API"]
+
+    SP --> SPT["spatial_processing_tool\n坐标投影 + 矢量生成"]
+  </div>
+</div>
+
+<hr class="divider">
+
+<!-- ==================== 图4: 端到端数据流 ==================== -->
+<div class="diagram-section">
+  <div class="diagram-title">图4 端到端数据流示例</div>
+  <div class="diagram-subtitle">用户消息 "加载种子场可采区到地图" 的完整处理链路</div>
+  <div class="mermaid">
+%%{init: {'theme': 'base', 'themeVariables': {'fontSize': '14px'}}}%%
+flowchart LR
+    U["💬 用户输入\n'加载种子场可采区\n到地图'"] --> I
+
+    subgraph I["intent_node"]
+        direction TB
+        I1["IntentAgent.analyze()"] --> I2["IntentResult:\nprimary_intent = map_display\nconfidence = 0.95\nentities = ['种子场可采区']"]
+    end
+
+    I --> T
+
+    subgraph T["tool_node"]
+        direction TB
+        T1["TaskStep:\ntool = map_tool\naction = load_vector_layer\ntable = ceshen\nfilter = Mineable_Area_Name\n= '种子场可采区'"] --> T2["QwenToolAdapter\n.invoke(params)"]
+        T2 --> T3["返回:\nsuccess = true\nmap_command = {...}\nfeature_count = 42"]
+    end
+
+    T --> R
+
+    subgraph R["response_node"]
+        direction TB
+        R1["提取 map_commands"] --> R2["LLM 生成回复:\n'种子场可采区数据\n已成功加载到地图'"]
+    end
+
+    R --> F
+
+    subgraph F["前端"]
+        direction TB
+        F1["📝 显示回复文本"] ~~~ F2["🗺️ 执行 map_command\nload_vector_layer"]
+    end
+  </div>
+</div>
+
+<hr class="divider">
+
+<!-- ==================== 图5: SSE 流式事件时间线 ==================== -->
+<div class="diagram-section">
+  <div class="diagram-title">图5 SSE 流式事件时间线</div>
+  <div class="diagram-subtitle">execute_stream() 产出的 SSE 事件序列，前端可实时渲染每个阶段的进度</div>
+  <div class="mermaid">
+%%{init: {'theme': 'base', 'themeVariables': {'fontSize': '14px'}}}%%
+flowchart LR
+    S(["status\nstart\n开始处理"]) --> IS(["status\nintent_start\n意图分析中..."])
+
+    IS --> IR["intent\n识别结果\nIntentResult JSON\n+ execution_plan"]
+
+    IR --> TP(["status\ntool_plan\n工具执行计划"])
+
+    TP --> TS1["tool_start\n步骤 1 开始\n'map_tool'"]
+    TS1 --> TR1["tool_result\n步骤 1 结果\nsuccess + data"]
+
+    TR1 --> TS2["tool_start\n步骤 2 开始\n'postgresql_tool'"]
+    TS2 --> TR2["tool_result\n步骤 2 结果\nsuccess + data"]
+
+    TR2 --> RS(["status\nresponse\n汇总生成中..."])
+
+    RS --> FN["final\n最终结果\nresponse + map_commands\n+ charts + report_url"]
+
+    FN --> DN(["status\ndone\n处理完成"])
+  </div>
+</div>
+
+<script>
+mermaid.initialize({
+  startOnLoad: true,
+  theme: 'base',
+  flowchart: {
+    useMaxWidth: true,
+    htmlLabels: true,
+    curve: 'basis',
+    nodeSpacing: 40,
+    rankSpacing: 50,
+    padding: 20
+  },
+  themeVariables: {
+    primaryColor: '#e8f4fd',
+    primaryBorderColor: '#0f3460',
+    primaryTextColor: '#1a1a2e',
+    lineColor: '#555',
+    secondaryColor: '#f0f0f0',
+    tertiaryColor: '#fff',
+    fontSize: '15px',
+    fontFamily: 'Microsoft YaHei, PingFang SC, sans-serif'
+  }
+});
+</script>
+</body>
+</html>

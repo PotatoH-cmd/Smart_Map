@@ -1,0 +1,21 @@
+services:
+  geoserver:
+    image: docker.osgeo.org/geoserver:2.26.2
+    container_name: map-assistant-geoserver
+    restart: unless-stopped
+    ports:
+      - "${GEOSERVER_HOST_PORT:-8088}:8080"
+    environment:
+      GEOSERVER_ADMIN_USER: "${GEOSERVER_USER:-admin}"
+      GEOSERVER_ADMIN_PASSWORD: "${GEOSERVER_PASSWORD:-change_me}"
+      INSTALL_EXTENSIONS: "true"
+      STABLE_EXTENSIONS: "postgis,vectortiles"
+      EXTRA_JAVA_OPTS: "-Xms512m -Xmx2g -Dorg.geotools.referencing.forceXY=true"
+    volumes:
+      - ./geoserver_data:/opt/geoserver_data
+    networks:
+      - map_assistant_geo
+
+networks:
+  map_assistant_geo:
+    name: map_assistant_geo

@@ -1,0 +1,161 @@
+# ============================================================
+# Python
+# ============================================================
+**/__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+*.egg
+dist/
+build/
+*.so
+
+# ============================================================
+# Node.js
+# ============================================================
+**/node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.cache/
+
+# ============================================================
+# Logs
+# ============================================================
+*.log
+*.err
+*.out
+
+# ============================================================
+# IDE & Tools
+# ============================================================
+.vscode/
+.idea/
+.qoder/
+.codebuddy/
+.windsurf/
+.trae/
+*.swp
+*.swo
+*~
+
+# ============================================================
+# Environment & Secrets
+# ============================================================
+.env
+!.env.template
+
+# ============================================================
+# Database files
+# ============================================================
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# ============================================================
+# Large binary / data files
+# ============================================================
+*.tif
+*.tiff
+*.zip
+*.tar.gz
+*.tar
+*.7z
+*.rar
+*.pt
+*.pth
+*.ckpt
+*.h5
+*.pb
+
+# ============================================================
+# PDF & binary documents
+# ============================================================
+*.pdf
+*.docx
+*.xlsx
+*.pptx
+*.doc
+
+# Exceptions: template files needed by the application
+!map_assistant_v1/backend/templates/report_template.docx
+
+# ============================================================
+# Generated / build output
+# ============================================================
+map_assistant_v1/frontend/build/
+
+# ============================================================
+# Generated data directories
+# ============================================================
+map_assistant_v1/backend/.gis_logs/
+map_assistant_v1/backend/llama_index_storage/
+map_assistant_v1/backend/vector_tiles/
+map_assistant_v1/backend/3dtiles_data/
+map_assistant_v1/backend/drone_imagery/
+map_assistant_v1/backend/static/geojson/
+map_assistant_v1/backend/workspace/
+map_assistant_v1/deploy/geoserver_data/
+map_assistant_v1/dify_md_output/
+map_assistant_v1/images/
+map_assistant_v1/workspace/
+
+# Accidental files
+map_assistant_v1/backend/=*
+
+# ============================================================
+# Other project directories (not map_assistant_v1)
+# ============================================================
+Falcon-main/
+GIS/
+OCR/
+OmniOVCD/
+WorldQuant-miner-master/
+YOLOV11/
+Yuxi-Know-main/
+aiWatchdog-main/
+awesome-digital-human-live2d-main/
+deer/
+deer-flow_1.0/
+lc-studylab-main/
+ragflow-main/
+seg/
+simple_map_tool/
+test/
+ultralytics-main/
+visual_sat_search/
+vrt_temp/
+yanshan/
+yolo_skill/
+qwen3-vl_lora微调/
+
+# ============================================================
+# Misc root files (not map_assistant_v1)
+# ============================================================
+3d_tiles_section.png
+智能体架构流程图_screenshot.png
+mining_area.*
+mining_area_shapefile.py
+river_names.xlsx
+check_tif.py
+convert_coords.py
+generate_docs.py
+yolo_skill.tar.gz
+yolo_skill.zip
+map_assistant_v1.tar.gz
+deer-flow-main.tar.gz
+
+# ============================================================
+# macOS
+# ============================================================
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# ============================================================
+# Backup files
+# ============================================================
+*.bak
+*.backup
+*.orig

@@ -1,4 +1,9 @@
 {
+  "caiqu": [
+    "id (integer)",
+    "geom (USER-DEFINED)",
+    "properties (jsonb)"
+  ],
   "ceshen": [
     "ID (integer)",
     "Year (integer)",
@@ -10,6 +15,11 @@
     "Lon_4326 (real)",
     "Lat_4326 (real)",
     "geom (USER-DEFINED)"
+  ],
+  "hx": [
+    "id (integer)",
+    "geom (USER-DEFINED)",
+    "properties (jsonb)"
   ],
   "knowledge_base": [
     "id (integer)",
