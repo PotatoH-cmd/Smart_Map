@@ -238,7 +238,9 @@ docker-compose up -d
 
 | 层级 | 技术 |
 |------|------|
-| **AI 引擎** | Qwen3 / Qwen Agent、DashScope |
+| **AI 编排** | LangGraph、LangChain、Qwen Agent |
+| **大模型** | Qwen3 (DashScope API)、OpenAI 兼容接口 |
+| **知识库** | LlamaIndex、Dify、RagFlow |
 | **后端框架** | FastAPI、Uvicorn、PM2 |
 | **前端框架** | React 18、Create React App |
 | **2D 地图** | Leaflet、Leaflet.VectorGrid、Esri Leaflet |
@@ -246,7 +248,7 @@ docker-compose up -d
 | **空间数据库** | PostgreSQL 14、PostGIS 3.x |
 | **影像处理** | GDAL、Rasterio、NumPy |
 | **AI 模型** | SAM、OmniOVCD、YOLOv11 |
-| **知识库** | Dify、LlamaIndex、RagFlow |
+| **模型生态** | HuggingFace Hub、Gradio |
 | **可视化** | ECharts |
 | **部署** | Docker、Nginx、PM2 |
 
