@@ -95,6 +95,9 @@ map_assistant_v1/backend/vector_tiles/
 map_assistant_v1/backend/3dtiles_data/
 map_assistant_v1/backend/drone_imagery/
 map_assistant_v1/backend/static/geojson/
+map_assistant_v1/backend/static/screenshots/
+map_assistant_v1/frontend/public/data/
+map_assistant_v1/frontend/node_modules/.cache/
 map_assistant_v1/backend/workspace/
 map_assistant_v1/deploy/geoserver_data/
 map_assistant_v1/dify_md_output/
