@@ -8,12 +8,17 @@
   </p>
   <p>
     <img src="https://img.shields.io/badge/Python-3.10+-blue" alt="Python">
-    <img src="https://img.shields.io/badge/FastAPI-0.100+-green" alt="FastAPI">
+    <img src="https://img.shields.io/badge/FastAPI-0.100+-009688" alt="FastAPI">
     <img src="https://img.shields.io/badge/React-18-61dafb" alt="React">
+    <img src="https://img.shields.io/badge/LangGraph-0.2+-2d8c4a" alt="LangGraph">
+    <img src="https://img.shields.io/badge/LangChain-0.3+-1c3c3c" alt="LangChain">
+    <img src="https://img.shields.io/badge/LlamaIndex-0.12+-ff6f00" alt="LlamaIndex">
     <img src="https://img.shields.io/badge/Leaflet-1.9-199900" alt="Leaflet">
-    <img src="https://img.shields.io/badge/Cesium-3D-orange" alt="Cesium">
+    <img src="https://img.shields.io/badge/Cesium-3D-67b7f7" alt="Cesium">
     <img src="https://img.shields.io/badge/PostGIS-3.0+-336791" alt="PostGIS">
-    <img src="https://img.shields.io/badge/Qwen-Agent-purple" alt="Qwen Agent">
+    <img src="https://img.shields.io/badge/OpenAI-API-412991" alt="OpenAI">
+    <img src="https://img.shields.io/badge/HuggingFace-🤗-ffd21e" alt="HuggingFace">
+    <img src="https://img.shields.io/badge/Docker-🐳-2496ed" alt="Docker">
   </p>
 </div>
 
