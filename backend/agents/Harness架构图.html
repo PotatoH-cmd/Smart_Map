@@ -1,0 +1,404 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Map Assistant · Harness 架构图</title>
+<style>
+  :root {
+    --bg: #0f1420;
+    --bg-soft: #161d2e;
+    --card: #1b2438;
+    --card-2: #212c44;
+    --line: #33405c;
+    --text: #e6ebf5;
+    --muted: #97a3bd;
+    --accent: #5b8cff;
+    --map: #4dd0e1;
+    --data: #ffb74d;
+    --know: #9ccc65;
+    --report: #ba68c8;
+    --general: #78909c;
+    --danger: #ef5b6b;
+    --ok: #35c17e;
+    --shadow: 0 8px 30px rgba(0,0,0,.35);
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, "PingFang SC", "Microsoft YaHei", "Segoe UI", sans-serif;
+    background: radial-gradient(1200px 600px at 20% -10%, #1c2740 0%, var(--bg) 55%) fixed;
+    color: var(--text);
+    line-height: 1.6;
+    padding: 40px 20px 80px;
+  }
+  .wrap { max-width: 1180px; margin: 0 auto; }
+  header.page {
+    text-align: center;
+    margin-bottom: 48px;
+  }
+  header.page h1 {
+    font-size: 32px; margin: 0 0 10px;
+    background: linear-gradient(90deg, #7aa2ff, #4dd0e1 60%, #9ccc65);
+    -webkit-background-clip: text; background-clip: text; color: transparent;
+  }
+  header.page p { color: var(--muted); margin: 0; font-size: 15px; }
+
+  section.fig {
+    background: linear-gradient(180deg, var(--bg-soft), #12192a);
+    border: 1px solid var(--line);
+    border-radius: 18px;
+    padding: 28px 30px 34px;
+    margin-bottom: 34px;
+    box-shadow: var(--shadow);
+  }
+  .fig-head { display: flex; align-items: center; gap: 12px; margin-bottom: 24px; }
+  .fig-idx {
+    width: 34px; height: 34px; flex: 0 0 34px;
+    border-radius: 10px; display: grid; place-items: center;
+    font-weight: 700; font-size: 15px; color: #0f1420;
+    background: linear-gradient(135deg, #7aa2ff, #4dd0e1);
+  }
+  .fig-head h2 { font-size: 19px; margin: 0; }
+  .fig-head .sub { color: var(--muted); font-size: 13px; margin-left: auto; }
+
+  .node {
+    background: var(--card);
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    padding: 12px 16px;
+    text-align: center;
+    box-shadow: 0 3px 12px rgba(0,0,0,.25);
+  }
+  .node .t { font-weight: 600; font-size: 14px; }
+  .node .d { font-size: 12px; color: var(--muted); margin-top: 3px; }
+  .node.accent { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent) inset, 0 6px 18px rgba(91,140,255,.25); }
+
+  /* ===== Fig 1: layered overview ===== */
+  .layer { display: flex; align-items: center; gap: 16px; margin: 14px 0; }
+  .layer .tag {
+    writing-mode: vertical-rl; text-orientation: upright;
+    font-size: 12px; letter-spacing: 3px; color: var(--muted);
+    border-left: 3px solid var(--accent); padding: 6px 0 6px 8px; height: 100%;
+    flex: 0 0 auto;
+  }
+  .layer .body { flex: 1; display: flex; gap: 12px; flex-wrap: wrap; }
+  .layer .body .node { flex: 1; min-width: 120px; }
+  .flow-down { text-align: center; color: var(--accent); font-size: 20px; margin: -2px 0; }
+
+  .agent-map { border-top: 3px solid var(--map); }
+  .agent-data { border-top: 3px solid var(--data); }
+  .agent-know { border-top: 3px solid var(--know); }
+  .agent-report { border-top: 3px solid var(--report); }
+  .agent-general { border-top: 3px solid var(--general); }
+
+  /* ===== generic grid ===== */
+  .grid { display: grid; gap: 14px; }
+
+  /* ===== Fig 2: sequence ===== */
+  .seq { display: flex; flex-direction: column; gap: 0; }
+  .seq-row { display: grid; grid-template-columns: 40px 1fr; gap: 16px; }
+  .seq-rail { display: flex; flex-direction: column; align-items: center; }
+  .seq-dot {
+    width: 20px; height: 20px; border-radius: 50%;
+    background: var(--accent); color: #0f1420; font-size: 11px; font-weight: 700;
+    display: grid; place-items: center; margin-top: 14px; z-index: 1;
+  }
+  .seq-line { width: 2px; flex: 1; background: var(--line); }
+  .seq-card {
+    background: var(--card); border: 1px solid var(--line); border-radius: 12px;
+    padding: 12px 16px; margin: 8px 0;
+  }
+  .seq-card h4 { margin: 0 0 4px; font-size: 14px; }
+  .seq-card p { margin: 0; font-size: 12.5px; color: var(--muted); }
+  .seq-card code { background: #0d1424; color: #8fb8ff; padding: 1px 6px; border-radius: 5px; font-size: 12px; }
+
+  /* ===== Fig 3: dispatch ===== */
+  .dispatch { display: grid; grid-template-columns: 1fr 60px 1fr; align-items: center; gap: 10px; }
+  .intents, .agents { display: flex; flex-direction: column; gap: 10px; }
+  .pill {
+    padding: 9px 14px; border-radius: 999px; font-size: 13px; text-align: center;
+    background: var(--card); border: 1px solid var(--line);
+  }
+  .arrows { display: flex; flex-direction: column; align-items: center; color: var(--muted); }
+  .arrows svg { width: 100%; }
+  .agent-box { padding: 12px 14px; border-radius: 12px; background: var(--card-2); border: 1px solid var(--line); }
+  .agent-box .name { font-weight: 700; font-size: 14px; }
+  .agent-box .tools { font-size: 11.5px; color: var(--muted); margin-top: 4px; }
+  .dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; margin-right: 6px; vertical-align: middle; }
+
+  /* ===== Fig 4: routing ===== */
+  .route { display: grid; gap: 12px; }
+  .decision {
+    display: grid; grid-template-columns: 1fr auto; align-items: center; gap: 14px;
+    background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 12px 16px;
+  }
+  .decision .cond { font-size: 13.5px; }
+  .decision .cond code { background: #0d1424; color: #8fb8ff; padding: 1px 6px; border-radius: 5px; font-size: 12px; }
+  .badge { font-size: 12px; font-weight: 700; padding: 5px 12px; border-radius: 8px; white-space: nowrap; }
+  .b-end { background: rgba(239,91,107,.16); color: #ff8b97; border: 1px solid rgba(239,91,107,.4); }
+  .b-resp { background: rgba(91,140,255,.16); color: #9db9ff; border: 1px solid rgba(91,140,255,.4); }
+  .b-tool { background: rgba(53,193,126,.16); color: #6be0a6; border: 1px solid rgba(53,193,126,.4); }
+
+  /* ===== Fig 5: tool layer ===== */
+  .tools-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; }
+  .tool-chip {
+    background: var(--card); border: 1px solid var(--line); border-radius: 10px;
+    padding: 10px 12px; font-size: 12.5px; text-align: center;
+  }
+  .adapter-flow { display: flex; align-items: center; justify-content: center; gap: 14px; flex-wrap: wrap; margin-bottom: 22px; }
+  .adapter-flow .arrow { color: var(--accent); font-size: 22px; }
+
+  .legend { display: flex; gap: 18px; flex-wrap: wrap; margin-top: 20px; font-size: 12px; color: var(--muted); }
+  .legend span { display: inline-flex; align-items: center; }
+
+  .note {
+    margin-top: 18px; font-size: 12.5px; color: var(--muted);
+    border-left: 3px solid var(--accent); padding: 6px 0 6px 12px; background: rgba(91,140,255,.06);
+    border-radius: 0 8px 8px 0;
+  }
+  @media (max-width: 760px) {
+    .tools-grid { grid-template-columns: repeat(2,1fr); }
+    .dispatch { grid-template-columns: 1fr; }
+    .arrows { transform: rotate(90deg); height: 40px; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header class="page">
+    <h1>Map Assistant · Harness 架构图</h1>
+    <p>调度中枢（AgentHarness） + 可插拔部件 + LangGraph 编排器（TaskExecutor）</p>
+  </header>
+
+  <!-- ================= FIG 1 ================= -->
+  <section class="fig">
+    <div class="fig-head">
+      <div class="fig-idx">1</div>
+      <h2>整体分层架构</h2>
+      <span class="sub">请求自上而下流经四层</span>
+    </div>
+
+    <div class="layer">
+      <div class="tag">入口层</div>
+      <div class="body">
+        <div class="node accent"><div class="t">前端 /chat 请求</div><div class="d">SSE 流式对话</div></div>
+        <div class="node accent"><div class="t">main.py</div><div class="d">USE_INTENT_AGENT=true 时接管</div></div>
+      </div>
+    </div>
+    <div class="flow-down">▼</div>
+
+    <div class="layer">
+      <div class="tag">编排层</div>
+      <div class="body">
+        <div class="node" style="border-color:var(--accent)"><div class="t">TaskExecutor（LangGraph 编排器）</div><div class="d">intent_node → tool_node → response_node · 三段式流水线</div></div>
+      </div>
+    </div>
+    <div class="flow-down">▼</div>
+
+    <div class="layer">
+      <div class="tag">调度层</div>
+      <div class="body">
+        <div class="node"><div class="t">AgentHarness 调度中枢</div><div class="d">快速路由 · 意图分派 · 提示词组装 · 上下文注入</div></div>
+        <div class="node"><div class="t">IntentAgent</div><div class="d">LLM 结构化输出 IntentResult</div></div>
+      </div>
+    </div>
+    <div class="flow-down">▼</div>
+
+    <div class="layer">
+      <div class="tag">执行层</div>
+      <div class="body">
+        <div class="node agent-map"><div class="t">MapAgent</div><div class="d">地图/空间</div></div>
+        <div class="node agent-data"><div class="t">DataAgent</div><div class="d">查询/图表</div></div>
+        <div class="node agent-know"><div class="t">KnowledgeAgent</div><div class="d">知识检索</div></div>
+        <div class="node agent-report"><div class="t">ReportAgent</div><div class="d">报告生成</div></div>
+        <div class="node agent-general"><div class="t">GeneralAgent</div><div class="d">兜底</div></div>
+      </div>
+    </div>
+
+    <div class="note">编排层负责「跑流程」，调度层负责「导向正确的领域 Agent 与工具集」，执行层各 Agent 自持领域提示词与工具集——三层解耦、可插拔替换。</div>
+  </section>
+
+  <!-- ================= FIG 2 ================= -->
+  <section class="fig">
+    <div class="fig-head">
+      <div class="fig-idx">2</div>
+      <h2>一次请求的完整流转</h2>
+      <span class="sub">从用户输入到结构化输出</span>
+    </div>
+
+    <div class="seq">
+      <div class="seq-row">
+        <div class="seq-rail"><div class="seq-dot">1</div><div class="seq-line"></div></div>
+        <div class="seq-card"><h4>快速关键词路由</h4><p>TaskExecutor 先问 <code>harness.try_fast_classify()</code>，命中高频命令即绕过 LLM，构造 <code>confidence=0.95</code> 的意图</p></div>
+      </div>
+      <div class="seq-row">
+        <div class="seq-rail"><div class="seq-dot">2</div><div class="seq-line"></div></div>
+        <div class="seq-card"><h4>LLM 意图分析（未命中时）</h4><p><code>IntentAgent.analyze()</code> 用结构化输出得到 <code>IntentResult</code>：意图 + 实体 + execution_plan</p></div>
+      </div>
+      <div class="seq-row">
+        <div class="seq-rail"><div class="seq-dot">3</div><div class="seq-line"></div></div>
+        <div class="seq-card"><h4>路由决策</h4><p><code>_route_after_intent</code> 依据置信度 / 是否确认 / 是否需要工具，决定去 END、response_node 还是 tool_node</p></div>
+      </div>
+      <div class="seq-row">
+        <div class="seq-rail"><div class="seq-dot">4</div><div class="seq-line"></div></div>
+        <div class="seq-card"><h4>并发执行工具</h4><p>按 execution_plan 经 <code>ToolRegistry</code> 创建实例、<code>QwenToolAdapter</code> 统一包装，<code>asyncio</code> 并发调用</p></div>
+      </div>
+      <div class="seq-row">
+        <div class="seq-rail"><div class="seq-dot">5</div><div class="seq-line"></div></div>
+        <div class="seq-card"><h4>汇总响应</h4><p>取 <code>harness.build_response_prompt_for()</code> 话术 + <code>get_system_context()</code> 时间，LLM 汇总为自然语言</p></div>
+      </div>
+      <div class="seq-row">
+        <div class="seq-rail"><div class="seq-dot" style="background:var(--ok)">✓</div></div>
+        <div class="seq-card" style="border-color:rgba(53,193,126,.4)"><h4>返回前端</h4><p>response + map_commands + cesium_commands + charts + report_url</p></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================= FIG 3 ================= -->
+  <section class="fig">
+    <div class="fig-head">
+      <div class="fig-idx">3</div>
+      <h2>意图 → Agent 分派映射</h2>
+      <span class="sub">harness.dispatch()</span>
+    </div>
+
+    <div class="dispatch">
+      <div class="intents">
+        <div class="pill"><span class="dot" style="background:var(--map)"></span>map_display</div>
+        <div class="pill"><span class="dot" style="background:var(--map)"></span>location_search</div>
+        <div class="pill"><span class="dot" style="background:var(--map)"></span>coordinate_marker</div>
+        <div class="pill"><span class="dot" style="background:var(--map)"></span>spatial_processing</div>
+        <div class="pill"><span class="dot" style="background:var(--map)"></span>spatial_reference</div>
+        <div class="pill"><span class="dot" style="background:var(--data)"></span>data_query</div>
+        <div class="pill"><span class="dot" style="background:var(--data)"></span>data_visualization</div>
+        <div class="pill"><span class="dot" style="background:var(--know)"></span>knowledge_search</div>
+        <div class="pill"><span class="dot" style="background:var(--report)"></span>report_generation</div>
+        <div class="pill"><span class="dot" style="background:var(--general)"></span>unknown / weather / cross</div>
+      </div>
+
+      <div class="arrows">
+        <svg height="260" viewBox="0 0 60 260" preserveAspectRatio="none">
+          <g stroke="var(--line)" stroke-width="1.6" fill="none">
+            <path d="M2,20 C40,20 20,26 58,26"/>
+            <path d="M2,52 C40,52 20,26 58,26"/>
+            <path d="M2,84 C40,84 20,26 58,26"/>
+            <path d="M2,116 C40,116 20,26 58,26"/>
+            <path d="M2,148 C40,148 20,26 58,26"/>
+            <path d="M2,180 C40,180 20,110 58,110"/>
+            <path d="M2,212 C40,212 20,110 58,110"/>
+            <path d="M2,244 C40,244 20,158 58,158"/>
+            <path d="M2,260 C40,260 20,206 58,206"/>
+          </g>
+        </svg>
+      </div>
+
+      <div class="agents">
+        <div class="agent-box agent-map"><div class="name"><span class="dot" style="background:var(--map)"></span>MapAgent</div><div class="tools">map_tool · cesium_tool · location_search · coordinate_marker · spatial_processing_tool · spatial_reference_tool</div></div>
+        <div class="agent-box agent-data"><div class="name"><span class="dot" style="background:var(--data)"></span>DataAgent</div><div class="tools">postgresql_tool · data_visualizer_tool</div></div>
+        <div class="agent-box agent-know"><div class="name"><span class="dot" style="background:var(--know)"></span>KnowledgeAgent</div><div class="tools">knowledge_base_tool</div></div>
+        <div class="agent-box agent-report"><div class="name"><span class="dot" style="background:var(--report)"></span>ReportAgent</div><div class="tools">report_generator_tool</div></div>
+        <div class="agent-box agent-general"><div class="name"><span class="dot" style="background:var(--general)"></span>GeneralAgent（兜底）</div><div class="tools">开放全部 12 个工具 + 完整原始 prompt</div></div>
+      </div>
+    </div>
+    <div class="note">Agent 懒加载：首次分派时才实例化；任何未被专职 Agent 覆盖的意图统一落到 GeneralAgent，保证不退化。</div>
+  </section>
+
+  <!-- ================= FIG 4 ================= -->
+  <section class="fig">
+    <div class="fig-head">
+      <div class="fig-idx">4</div>
+      <h2>路由决策表</h2>
+      <span class="sub">_route_after_intent</span>
+    </div>
+
+    <div class="route">
+      <div class="decision">
+        <div class="cond"><code>intent_result is None</code> — 意图分析失败</div>
+        <div class="badge b-end">→ END 直接结束</div>
+      </div>
+      <div class="decision">
+        <div class="cond"><code>confidence &lt; 0.3</code> — 置信度过低</div>
+        <div class="badge b-end">→ END 兜底回复</div>
+      </div>
+      <div class="decision">
+        <div class="cond"><code>requires_confirmation</code> — 需要用户确认</div>
+        <div class="badge b-resp">→ response_node 生成确认文案</div>
+      </div>
+      <div class="decision">
+        <div class="cond">execution_plan 中<b>没有工具</b></div>
+        <div class="badge b-resp">→ response_node 直接回答</div>
+      </div>
+      <div class="decision">
+        <div class="cond">有需要调用的工具 —— 正常路径</div>
+        <div class="badge b-tool">→ tool_node 并发执行</div>
+      </div>
+    </div>
+    <div class="legend">
+      <span><span class="dot" style="background:#ff8b97"></span>直接结束</span>
+      <span><span class="dot" style="background:#9db9ff"></span>进入响应节点</span>
+      <span><span class="dot" style="background:#6be0a6"></span>进入工具节点</span>
+    </div>
+  </section>
+
+  <!-- ================= FIG 5 ================= -->
+  <section class="fig">
+    <div class="fig-head">
+      <div class="fig-idx">5</div>
+      <h2>工具层：注册表 + 统一适配</h2>
+      <span class="sub">ToolRegistry · QwenToolAdapter</span>
+    </div>
+
+    <div class="adapter-flow">
+      <div class="node"><div class="t">step.tool</div><div class="d">execution_plan 中的工具名</div></div>
+      <span class="arrow">→</span>
+      <div class="node accent"><div class="t">ToolRegistry.create()</div><div class="d">名称 → 零参数工厂</div></div>
+      <span class="arrow">→</span>
+      <div class="node"><div class="t">QwenToolAdapter</div><div class="d">统一 invoke(params)</div></div>
+      <span class="arrow">→</span>
+      <div class="node"><div class="t">run_in_executor</div><div class="d">同步工具异步化</div></div>
+    </div>
+
+    <div class="tools-grid">
+      <div class="tool-chip">map_tool</div>
+      <div class="tool-chip">cesium_tool</div>
+      <div class="tool-chip">location_search</div>
+      <div class="tool-chip">coordinate_marker</div>
+      <div class="tool-chip">postgresql_tool</div>
+      <div class="tool-chip">mcp_postgres_tool</div>
+      <div class="tool-chip">knowledge_base_tool ⚙</div>
+      <div class="tool-chip">data_visualizer_tool</div>
+      <div class="tool-chip">report_generator_tool</div>
+      <div class="tool-chip">weather_tool</div>
+      <div class="tool-chip">spatial_processing_tool</div>
+      <div class="tool-chip">spatial_reference_tool</div>
+    </div>
+    <div class="note">⚙ knowledge_base_tool 依据环境变量 <b>KNOWLEDGE_BACKEND</b>（ragflow / llamaindex）动态选择实现，对外接口统一。新增工具只需在注册表加一个工厂函数，无需改执行逻辑。</div>
+  </section>
+
+  <!-- ================= FIG 6 ================= -->
+  <section class="fig">
+    <div class="fig-head">
+      <div class="fig-idx">6</div>
+      <h2>稳健性兜底机制</h2>
+      <span class="sub">TaskExecutor 内置容错</span>
+    </div>
+    <div class="grid" style="grid-template-columns:repeat(3,1fr)">
+      <div class="node" style="text-align:left;border-top:3px solid var(--ok)">
+        <div class="t">DB 空结果 → 知识库回退</div>
+        <div class="d" style="margin-top:6px">数据库返回空/失败/可疑聚合值时，自动追加 knowledge_base_tool 检索，响应阶段再同步补偿</div>
+      </div>
+      <div class="node" style="text-align:left;border-top:3px solid var(--data)">
+        <div class="t">报告数据充分性检查</div>
+        <div class="d" style="margin-top:6px">报告工具等前置工具完成后先校验数据；不足则跳过生成，避免产出空报告</div>
+      </div>
+      <div class="node" style="text-align:left;border-top:3px solid var(--accent)">
+        <div class="t">富结果直通</div>
+        <div class="d" style="margin-top:6px">工具已返回高质量 Markdown 摘要时直接透传，跳过 LLM 二次汇总，省时省 token</div>
+      </div>
+    </div>
+  </section>
+
+</div>
+</body>
+</html>

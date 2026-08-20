@@ -1,0 +1,46 @@
+# QGIS MCP 服务
+# 独立部署，也可合并到项目主 docker-compose.yml
+# 启动: docker compose -f docker/qgis-mcp/docker-compose.yml up -d
+# 停止: docker compose -f docker/qgis-mcp/docker-compose.yml down
+
+services:
+  qgis-mcp:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: qgis-mcp
+    restart: unless-stopped
+    ports:
+      - "8036:8000"      # MCP HTTP 服务（对后端暴露）
+      # 9876 不对外暴露（仅容器内 QGIS 插件与 MCP Server 通信）
+    environment:
+      - QGIS_MCP_HOST=localhost
+      - QGIS_MCP_PORT=9876
+      - QGIS_MCP_TRANSPORT=streamable-http
+      - QGIS_MCP_TOOL_MODE=compound
+      - QGIS_MCP_TOKEN=${QGIS_MCP_TOKEN:-}
+      - QGIS_MCP_LOG_LEVEL=WARNING
+    volumes:
+      # 持久化 QGIS 设置和插件（容器重建后不需重新安装）
+      - qgis_data:/home/qgis/.local/share/QGIS
+      # 挂载项目数据目录（让 QGIS 能访问 GIS 数据）
+      - /home/server/python/map_assistant_v1/data:/data:ro
+      - /home/server/python/GIS:/gis_data:ro
+      # 用户上传的 SHP 文件（后端写入 → 容器内 QGIS 可读取）
+      - /home/server/python/GIS/uploads:/uploads:rw
+      # 挂载后端 geojson 输出（QGIS 生成的 geojson 可被后端直接使用）
+      - /home/server/python/map_assistant_v1/backend/static/geojson:/output:rw
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    # 资源限制
+    deploy:
+      resources:
+        limits:
+          memory: 4g
+          cpus: "4"
+
+volumes:
+  qgis_data:

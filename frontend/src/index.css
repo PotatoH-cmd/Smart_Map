@@ -1,0 +1,84 @@
+body {
+  margin: 0;
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  background: #fafbfc;
+}
+
+/* 全局微妙的顶部渐变光晕 */
+@keyframes bgPulse1 {
+  0%, 100% { opacity: 0.4; }
+  50% { opacity: 0.7; }
+}
+
+body::before {
+  content: '';
+  position: fixed;
+  top: 0; left: 0; right: 0; bottom: 0;
+  pointer-events: none;
+  z-index: -1;
+  background:
+    radial-gradient(ellipse 60% 30% at 50% 0%, rgba(37, 99, 235, 0.03) 0%, transparent 60%),
+    radial-gradient(ellipse 50% 35% at 80% 90%, rgba(37, 99, 235, 0.02) 0%, transparent 55%);
+  animation: bgPulse1 12s ease-in-out infinite;
+}
+
+code {
+  font-family: 'SF Mono', 'Cascadia Code', Consolas, 'Courier New', monospace;
+}
+
+/* ========================================================================
+   现代化滚动条
+   ======================================================================== */
+
+/* Firefox */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(156, 163, 175, 0.3) transparent;
+}
+
+/* WebKit (Chrome/Safari/Edge) */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(156, 163, 175, 0.3);
+  border-radius: 3px;
+  transition: background 0.3s ease;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(107, 114, 128, 0.45);
+}
+
+::-webkit-scrollbar-thumb:active {
+  background: rgba(75, 85, 99, 0.6);
+}
+
+::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+/* ── 选择文本颜色 ── */
+::selection {
+  background: rgba(37, 99, 235, 0.15);
+  color: #111827;
+}
+
+::-moz-selection {
+  background: rgba(37, 99, 235, 0.15);
+  color: #111827;
+}
+
+/* ── 全局平滑滚动 ── */
+html {
+  scroll-behavior: smooth;
+}

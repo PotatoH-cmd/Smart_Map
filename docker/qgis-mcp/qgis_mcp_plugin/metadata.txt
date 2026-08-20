@@ -1,0 +1,44 @@
+[general]
+name=QGIS MCP
+qgisMinimumVersion=3.28
+qgisMaximumVersion=4.99
+description=Connect QGIS to Claude AI via the Model Context Protocol (MCP)
+about=Socket server plugin that exposes QGIS operations to LLMs through the
+    Model Context Protocol. Enables Claude to directly control QGIS: manage
+    layers, edit features, run processing algorithms, render maps, and more.
+
+    This plugin is only one half of the setup. You also need an MCP server
+    so that Claude (or another LLM) can talk to QGIS.
+    See https://github.com/nkarasiak/qgis-mcp for installation instructions.
+
+    Features:
+    - 100+ MCP tools for layers, features, processing, rendering, layouts
+    - Diagnose tool for full stack health checks
+    - Plugin development tools: message log, plugin reload, layer tree
+    - Expression validation, project variables, settings access
+    - Non-blocking TCP socket server with length-prefixed framing
+    - Toolbar button with port configuration dropdown
+
+version=0.9.3
+author=Nicolas Karasiak
+email=nicart@gmail.com
+tags=mcp,ai,claude,llm,automation,socket,remote
+homepage=https://github.com/nkarasiak/qgis-mcp
+tracker=https://github.com/nkarasiak/qgis-mcp/issues
+repository=https://github.com/nkarasiak/qgis-mcp
+license=MIT
+category=Plugins
+icon=icons/icon.png
+experimental=False
+deprecated=False
+changelog=0.9.3 : Configurator adds Kimi Code CLI, Gemini CLI, Qwen Code,
+    GitHub Copilot CLI and LM Studio (#29, #30). Fixed the Windsurf config
+    path.
+    0.9.2 : Fixed get_layers and get_project_info on projects holding a
+    non-spatial table (#31, #32).
+    0.9.1 : Skip data providers with no saved connections without
+    try/except/continue.
+    0.9.0 : Thirteen new tools: database connections, edit sessions,
+    update_feature_geometry, raster styling. Multi-instance support via
+    QGIS_MCP_INSTANCES (#28).
+    Earlier releases: https://github.com/nkarasiak/qgis-mcp/releases

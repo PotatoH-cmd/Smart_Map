@@ -1,0 +1,31 @@
+[Unit]
+Description=Map Assistant Backend (FastAPI + Frontend)
+After=network.target postgresql.service
+Wants=network.target
+
+[Service]
+Type=simple
+User=server
+WorkingDirectory=/home/server/python/map_assistant_v1/backend
+
+# 环境变量
+Environment=PORT=8006
+Environment=USE_INTENT_AGENT=true
+Environment=CUDA_VISIBLE_DEVICES=0
+Environment=HF_ENDPOINT=https://hf-mirror.com
+EnvironmentFile=-/home/server/python/map_assistant_v1/backend/.env
+
+# 启动命令
+ExecStart=/home/server/miniconda3/envs/mapagent6/bin/python3 main.py
+
+# 崩溃自动重启
+Restart=on-failure
+RestartSec=5
+
+# 日志输出到 systemd journal，同时后端自身也会写 backend.log
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=map-assistant
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,218 @@
+{
+  "luoshan_gaodian_wangwan": {
+    "folder": "2豫罗砂许[2025]第01号",
+    "success": true,
+    "elapsed_s": 130.0,
+    "percent": 100,
+    "stage": "done",
+    "srs": "EPSG:4547"
+  },
+  "luoshan_shihuai": {
+    "folder": "3豫罗砂许[2025]第02号",
+    "success": true,
+    "elapsed_s": 240.0,
+    "percent": 100,
+    "stage": "done",
+    "srs": "EPSG:4547"
+  },
+  "luoshan_qinglian": {
+    "folder": "4豫罗砂许[2025]第03号",
+    "success": true,
+    "elapsed_s": 530.0,
+    "percent": 100,
+    "stage": "done",
+    "srs": "EPSG:4547"
+  },
+  "luoshan_qinglong_minwan": {
+    "folder": "5豫罗砂许[2025]第04号",
+    "success": true,
+    "elapsed_s": 345.0,
+    "percent": 100,
+    "stage": "done",
+    "srs": "EPSG:4547"
+  },
+  "luoshan_zhongshan": {
+    "folder": "6豫罗砂许[2025]第05号",
+    "success": true,
+    "elapsed_s": 690.0,
+    "percent": 100,
+    "stage": "done",
+    "srs": "EPSG:4547"
+  },
+  "luoshan_huaihe": {
+    "folder": "7豫罗砂许[2025]第06号",
+    "success": true,
+    "elapsed_s": 105.0,
+    "percent": 100,
+    "stage": "done",
+    "srs": "EPSG:4547"
+  },
+  "luoshan_tianhu_zhengwa": {
+    "folder": "8豫罗砂许[2025]第07号",
+    "success": true,
+    "elapsed_s": 560.0,
+    "percent": 100,
+    "stage": "done",
+    "srs": "EPSG:4547"
+  },
+  "luoshan_wuxiang": {
+    "folder": "9豫罗砂许[2025]第08号",
+    "success": true,
+    "elapsed_s": 115.0,
+    "percent": 100,
+    "stage": "done",
+    "srs": "EPSG:4547"
+  },
+  "luoshan_qiantan": {
+    "folder": "10豫罗砂许[2025]第09号(未测全为浅滩)",
+    "success": true,
+    "elapsed_s": 520.0,
+    "percent": 100,
+    "stage": "done",
+    "srs": "EPSG:4547"
+  },
+  "luoshan_nangan_lizai": {
+    "folder": "11豫罗砂许[2025]第10号",
+    "success": true,
+    "elapsed_s": 2595.1,
+    "percent": 100,
+    "stage": "done",
+    "srs": "EPSG:4547"
+  },
+  "huangchuan_haolou": {
+    "folder": "13豫潢砂许[2025]第1号",
+    "success": true,
+    "elapsed_s": 200.0,
+    "percent": 100,
+    "stage": "done",
+    "srs": "EPSG:4547"
+  },
+  "huangchuan_huangzhai": {
+    "folder": "14豫潢砂许[2025]第2号",
+    "success": true,
+    "elapsed_s": 325.0,
+    "percent": 100,
+    "stage": "done",
+    "srs": "EPSG:4547"
+  },
+  "gushi_tongmiao": {
+    "folder": "19豫信固砂许[2025]第01号",
+    "success": true,
+    "elapsed_s": 435.0,
+    "percent": 100,
+    "stage": "done",
+    "srs": "EPSG:4548"
+  },
+  "gushi_daying_fanying": {
+    "folder": "20豫信固砂许[2025]第02号",
+    "success": true,
+    "elapsed_s": 430.0,
+    "percent": 100,
+    "stage": "done",
+    "srs": "EPSG:4548"
+  },
+  "gushi_wangying": {
+    "folder": "21豫信固砂许[2025]第03号",
+    "success": true,
+    "elapsed_s": 230.0,
+    "percent": 100,
+    "stage": "done",
+    "srs": "EPSG:4548"
+  },
+  "gushi_hongshi": {
+    "folder": "22豫信固砂许[2025]第04号",
+    "success": true,
+    "elapsed_s": 255.0,
+    "percent": 100,
+    "stage": "done",
+    "srs": "EPSG:4548"
+  },
+  "gushi_chenying_liugou": {
+    "folder": "23豫信固砂许[2025]第05号",
+    "success": true,
+    "elapsed_s": 1375.0,
+    "percent": 100,
+    "stage": "done",
+    "srs": "EPSG:4548"
+  },
+  "gushi_zhengtang_dazhuang": {
+    "folder": "24豫信固砂许[2025]第06号",
+    "success": true,
+    "elapsed_s": 1365.0,
+    "percent": 100,
+    "stage": "done",
+    "srs": "EPSG:4548"
+  },
+  "gushi_yuqing_renzhu": {
+    "folder": "25豫信固砂许[2025]第07号",
+    "success": true,
+    "elapsed_s": 380.0,
+    "percent": 100,
+    "stage": "done",
+    "srs": "EPSG:4548"
+  },
+  "gushi_nanyuan_zhujialou": {
+    "folder": "26豫信固砂许[2025]第08号",
+    "success": true,
+    "elapsed_s": 265.0,
+    "percent": 100,
+    "stage": "done",
+    "srs": "EPSG:4548"
+  },
+  "gushi_niulaojia_longtan": {
+    "folder": "27豫信固砂许[2025]第09号",
+    "success": true,
+    "elapsed_s": 245.0,
+    "percent": 100,
+    "stage": "done",
+    "srs": "EPSG:4548"
+  },
+  "gushi_bidian": {
+    "folder": "28豫信固砂许[2025]第10号",
+    "success": true,
+    "elapsed_s": 120.0,
+    "percent": 100,
+    "stage": "done",
+    "srs": "EPSG:4548"
+  },
+  "gushi_sihu_changxing": {
+    "folder": "29豫信固砂许[2025]第11号",
+    "success": true,
+    "elapsed_s": 170.0,
+    "percent": 100,
+    "stage": "done",
+    "srs": "EPSG:4548"
+  },
+  "gushi_huaiyan_zhouji": {
+    "folder": "30豫信固砂许[2025]第12号",
+    "success": true,
+    "elapsed_s": 730.0,
+    "percent": 100,
+    "stage": "done",
+    "srs": "EPSG:4548"
+  },
+  "gushi_daochao": {
+    "folder": "31豫信固砂许[2025]第13号",
+    "success": true,
+    "elapsed_s": 350.0,
+    "percent": 100,
+    "stage": "done",
+    "srs": "EPSG:4548"
+  },
+  "gushi_yegang": {
+    "folder": "33豫信固砂许[2025]第15号",
+    "success": true,
+    "elapsed_s": 190.0,
+    "percent": 100,
+    "stage": "done",
+    "srs": "EPSG:4548"
+  },
+  "gushi_shenying": {
+    "folder": "34豫信固砂许[2025]第16号",
+    "success": true,
+    "elapsed_s": 560.0,
+    "percent": 100,
+    "stage": "done",
+    "srs": "EPSG:4548"
+  }
+}

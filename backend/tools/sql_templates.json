@@ -1,0 +1,18 @@
+[
+    {
+        "question": "统计潘庄砂场的平均超深和最大超深",
+        "sql": "SELECT ROUND(AVG((\"Control_Elevation\" - \"Measured_Depth\")::numeric), 2) AS avg_over_depth, ROUND(MAX((\"Control_Elevation\" - \"Measured_Depth\")::numeric), 2) AS max_over_depth FROM \"ceshen\" WHERE \"Control_Elevation\" IS NOT NULL AND \"Measured_Depth\" IS NOT NULL AND \"Mineable_Area_Name\"='潘庄砂场';"
+    },
+    {
+        "question": "查询陈营-柳沟采区的超深情况，包括违规数量",
+        "sql": "SELECT ROUND(AVG((\"Control_Elevation\" - \"Measured_Depth\")::numeric), 2) AS avg_over_depth, ROUND(MAX((\"Control_Elevation\" - \"Measured_Depth\")::numeric), 2) AS max_over_depth, SUM(CASE WHEN (\"Control_Elevation\" - \"Measured_Depth\") > 0 THEN 1 ELSE 0 END) AS violation_count FROM \"ceshen\" WHERE \"Control_Elevation\" IS NOT NULL AND \"Measured_Depth\" IS NOT NULL AND \"Mineable_Area_Name\"='陈营-柳沟采区';"
+    },
+    {
+        "question": "统计各县区的平均超深情况",
+        "sql": "SELECT \"County_District\", ROUND(AVG((\"Control_Elevation\" - \"Measured_Depth\")::numeric), 2) AS avg_over_depth, ROUND(MAX((\"Control_Elevation\" - \"Measured_Depth\")::numeric), 2) AS max_over_depth, SUM(CASE WHEN (\"Control_Elevation\" - \"Measured_Depth\") > 0 THEN 1 ELSE 0 END) AS violation_count FROM \"ceshen\" WHERE \"Control_Elevation\" IS NOT NULL AND \"Measured_Depth\" IS NOT NULL GROUP BY \"County_District\" ORDER BY \"County_District\";"
+    },
+    {
+        "question": "统计全区的平均超深",
+        "sql": "SELECT ROUND(AVG((\"Control_Elevation\" - \"Measured_Depth\")::numeric), 2) AS avg_over_depth FROM \"ceshen\" WHERE \"Control_Elevation\" IS NOT NULL AND \"Measured_Depth\" IS NOT NULL;"
+    }
+]

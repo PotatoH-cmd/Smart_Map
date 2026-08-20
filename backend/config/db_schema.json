@@ -1,0 +1,79 @@
+{
+  "caiqu": [
+    "id (integer)",
+    "geom (USER-DEFINED)",
+    "properties (jsonb)"
+  ],
+  "ceshen": [
+    "ID (integer)",
+    "Year (integer)",
+    "Mineable_Area_Name (character varying)",
+    "County_District (character varying)",
+    "Measured_Depth (real)",
+    "Control_Elevation (real)",
+    "Mineable_Area_ID (character varying)",
+    "Lon_4326 (real)",
+    "Lat_4326 (real)",
+    "geom (USER-DEFINED)"
+  ],
+  "hx": [
+    "id (integer)",
+    "geom (USER-DEFINED)",
+    "properties (jsonb)"
+  ],
+  "knowledge_base": [
+    "id (integer)",
+    "title (text)",
+    "content (text)",
+    "source (text)",
+    "tags (ARRAY)",
+    "created_at (timestamp with time zone)",
+    "embedding (USER-DEFINED)",
+    "parent_id (integer)",
+    "is_child (boolean)"
+  ],
+  "rtk_points": [
+    "id (integer)",
+    "point_id (text)",
+    "code (text)",
+    "geom (USER-DEFINED)",
+    "x_4547 (double precision)",
+    "y_4547 (double precision)",
+    "elev (numeric)",
+    "site_name (text)",
+    "permit_no (text)",
+    "ctrl_elev_max (numeric)",
+    "ctrl_elev_min (numeric)",
+    "ctrl_elev_source (text)",
+    "source_file (text)",
+    "created_at (timestamp with time zone)"
+  ],
+  "spatial_ref_sys": [
+    "srid (integer)",
+    "auth_name (character varying)",
+    "auth_srid (integer)",
+    "srtext (character varying)",
+    "proj4text (character varying)"
+  ],
+  "us_gaz": [
+    "id (integer)",
+    "seq (integer)",
+    "word (text)",
+    "stdword (text)",
+    "token (integer)",
+    "is_custom (boolean)"
+  ],
+  "us_lex": [
+    "id (integer)",
+    "seq (integer)",
+    "word (text)",
+    "stdword (text)",
+    "token (integer)",
+    "is_custom (boolean)"
+  ],
+  "us_rules": [
+    "id (integer)",
+    "rule (text)",
+    "is_custom (boolean)"
+  ]
+}

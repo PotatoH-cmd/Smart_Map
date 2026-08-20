@@ -1,0 +1,82 @@
+# ===== Python =====
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+.pytest_cache/
+pytest-of-server/
+
+# ===== Node / 前端构建产物 =====
+node_modules/
+frontend/build/
+# Cesium 静态资源由 npm 脚本 copy-cesium-assets.js 自动生成
+frontend/public/cesium/
+
+# ===== 环境变量与敏感配置（严禁推送）=====
+.env
+backend/.env
+frontend/.env
+
+# ===== 运行时数据库 / 会话 =====
+*.db
+*.sqlite3
+backend/sessions.db
+backend/tmp3x643zxw.db
+backend/kuzu_graph
+backend/kuzu_graph_meta.json
+
+# ===== 日志 =====
+*.log
+logs/
+backend/logs/
+backend/.gis_logs/
+backend/backend_*.log
+backend/backend_*.err
+backend/backend_*.out
+backend/pm2_*.log
+backend/restart.log
+backend/serve_tile-restore.log
+backend/frontend.log
+
+# ===== 大数据与运行时产物（影像 / 切片 / 报告，不推送）=====
+backend/drone_imagery/
+backend/static/reports/
+backend/static/screenshots/
+backend/static/uploads/
+backend/static/geojson/
+backend/vector_tiles/
+backend/3dtiles_data/
+backend/llama_index_storage/
+backend/uploaded_tile_data/
+backend/output/
+backend/data/
+
+# 保留以上目录结构（clone 后可直接运行）
+!backend/drone_imagery/.gitkeep
+!backend/static/reports/.gitkeep
+!backend/static/screenshots/.gitkeep
+!backend/static/uploads/.gitkeep
+!backend/static/geojson/.gitkeep
+!backend/vector_tiles/.gitkeep
+!backend/3dtiles_data/.gitkeep
+!backend/llama_index_storage/.gitkeep
+!backend/uploaded_tile_data/.gitkeep
+!backend/output/.gitkeep
+!backend/data/.gitkeep
+
+# ===== 文档资料与归档（不推送）=====
+大模型规范/
+资料归档/
+data/
+lora/
+workspace/
+deploy/geoserver_data/
+docs/*.docx
+
+# ===== 临时 / 杂项文件 =====
+backend/=0.12.0
+backend/=0.3.0
+backend/tools/point_predict.recovered.*
+backend/agents/无标题.txt
+*.tmp
+.DS_Store

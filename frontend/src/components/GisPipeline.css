@@ -1,0 +1,709 @@
+/* ====== GIS 流水线引擎 样式（浅色现代风格） ====== */
+
+.gis-pipeline {
+  display: flex;
+  width: 100%;
+  height: 100%;
+  background: #f0f2f5;
+  color: #1e293b;
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+  overflow: hidden;
+}
+
+/* 左侧控制面板 */
+.gis-pipeline-left {
+  width: 420px;
+  min-width: 380px;
+  height: 100%;
+  overflow-y: auto;
+  padding: 16px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  background: rgba(255, 255, 255, 0.88);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border-right: 1px solid #e2e8f0;
+}
+
+.gis-pipeline-title {
+  font-size: 16px;
+  font-weight: 700;
+  color: #0f172a;
+  border-left: 4px solid #2563eb;
+  padding-left: 12px;
+  margin: 0 0 4px 0;
+}
+
+/* 配置卡片 */
+.gis-config-card {
+  background: #ffffff;
+  border: 1px solid #e2e8f0;
+  padding: 10px 12px;
+  border-radius: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.03);
+}
+
+.gis-grid-2 {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+.gis-grid-3 {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr;
+  gap: 8px;
+}
+
+.gis-col-span-2 {
+  grid-column: span 2;
+  border-bottom: 1px solid #e2e8f0;
+  padding-bottom: 6px;
+  margin-bottom: 2px;
+}
+
+/* 标签 */
+.gis-label-pro {
+  font-size: 11px;
+  color: #64748b;
+  font-weight: 600;
+  display: block;
+  margin-bottom: 3px;
+}
+
+.gis-label-pro.gis-text-blue { color: #2563eb; font-size: 12px; font-weight: 700; }
+.gis-label-pro.gis-text-purple { color: #7c3aed; font-size: 11px; font-weight: 600; }
+.gis-label-pro.gis-mb0 { margin-bottom: 0; }
+
+/* 输入框 */
+.gis-input-pro {
+  background: #ffffff;
+  border: 1px solid #d9d9d9;
+  border-radius: 6px;
+  padding: 6px 8px;
+  width: 100%;
+  color: #1e293b;
+  font-size: 12px;
+  outline: none;
+  font-family: inherit;
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+
+.gis-input-pro:focus {
+  border-color: #3b82f6;
+  box-shadow: 0 0 0 2px rgba(59,130,246,0.1);
+}
+
+.gis-input-short {
+  width: 80px !important;
+}
+
+.gis-ta {
+  height: 60px;
+  font-size: 11px;
+  resize: vertical;
+}
+
+.gis-input-hint {
+  font-size: 11px;
+  color: #94a3b8;
+}
+
+.gis-input-hint-dim {
+  font-size: 10px;
+  color: #94a3b8;
+}
+
+.gis-input-group-inline {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+/* 按钮 */
+.gis-btn-browse {
+  width: 100%;
+  background: #f0f5ff;
+  color: #2563eb;
+  border: 1px solid #91bff7;
+  border-radius: 8px;
+  padding: 6px 10px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.15s;
+  font-family: inherit;
+}
+
+.gis-btn-browse:hover {
+  background: #dbeafe;
+  border-color: #3b82f6;
+}
+
+.gis-btn-xs {
+  padding: 3px 10px;
+  font-size: 11px;
+  border-radius: 6px;
+  border: 1px solid;
+  cursor: pointer;
+  font-family: inherit;
+  white-space: nowrap;
+  font-weight: 500;
+  transition: all 0.15s;
+}
+
+.gis-btn-purple {
+  background: #f3f0ff;
+  color: #7c3aed;
+  border-color: #c4b5fd;
+}
+.gis-btn-purple:hover { background: #ede9fe; border-color: #a78bfa; }
+
+.gis-btn-red {
+  background: #fef2f2;
+  color: #dc2626;
+  border-color: #fca5a5;
+}
+.gis-btn-red:hover { background: #fee2e2; border-color: #f87171; }
+
+.gis-btn-group {
+  display: flex;
+  gap: 4px;
+}
+
+/* 处理步骤卡片 */
+.gis-steps-section {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.gis-step-purple {
+  border-left: 3px solid #7c3aed;
+}
+.gis-step-blue {
+  border-left: 3px solid #3b82f6;
+  padding: 8px 12px;
+}
+.gis-step-orange {
+  border-left: 3px solid #f97316;
+  padding: 8px 12px;
+}
+.gis-step-green {
+  border-left: 3px solid #22c55e;
+  padding: 8px 12px;
+}
+.gis-step-purple-dim {
+  border-left: 3px solid #a78bfa;
+}
+
+.gis-step-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.gis-step-check {
+  font-size: 12px;
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  cursor: pointer;
+  color: #334155;
+}
+
+.gis-step-purple .gis-step-check { color: #7c3aed; }
+.gis-step-blue .gis-step-check { color: #2563eb; }
+.gis-step-orange .gis-step-check { color: #ea580c; }
+.gis-step-green .gis-step-check { color: #16a34a; }
+
+/* 批量去黑边文件列表 */
+.gis-be-file-list {
+  background: #f8fafc;
+  border-radius: 6px;
+  padding: 6px;
+  min-height: 36px;
+  max-height: 100px;
+  overflow-y: auto;
+  font-size: 11px;
+  border: 1px solid #e2e8f0;
+}
+
+.gis-be-empty {
+  color: #94a3b8;
+  font-size: 11px;
+}
+
+.gis-be-file-item {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 0;
+}
+
+.gis-be-in {
+  color: #7c3aed;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
+}
+
+.gis-be-arrow {
+  color: #94a3b8;
+  flex-shrink: 0;
+}
+
+.gis-be-out {
+  color: #64748b;
+  font-size: 10px;
+  flex-shrink: 0;
+}
+
+.gis-be-remove {
+  color: #ef4444;
+  background: none;
+  border: none;
+  cursor: pointer;
+  font-size: 11px;
+  padding: 0 2px;
+  flex-shrink: 0;
+}
+
+.gis-be-remove:hover {
+  color: #dc2626;
+}
+
+.gis-be-preview {
+  background: #f1f5f9;
+  border-radius: 6px;
+  padding: 6px;
+  font-size: 10px;
+  color: #7c3aed;
+  font-family: 'SF Mono', 'Cascadia Code', Consolas, monospace;
+  white-space: pre-wrap;
+  max-height: 80px;
+  overflow-y: auto;
+  border: 1px solid #e2e8f0;
+}
+
+/* 执行按钮区域 */
+.gis-btn-area {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 4px;
+}
+
+.gis-btn-run {
+  width: 100%;
+  padding: 12px;
+  background: linear-gradient(135deg, #0ea5e9 0%, #06b6d4 100%);
+  color: #fff;
+  font-size: 14px;
+  font-weight: 700;
+  border: none;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: all 0.15s;
+  font-family: inherit;
+  box-shadow: 0 2px 8px rgba(14,165,233,0.25);
+}
+
+.gis-btn-run:hover:not(:disabled) {
+  box-shadow: 0 4px 14px rgba(14,165,233,0.35);
+  transform: translateY(-1px);
+}
+
+.gis-btn-run:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  transform: none;
+  box-shadow: none;
+}
+
+.gis-btn-stop {
+  width: 100%;
+  padding: 10px;
+  background: #dc2626;
+  color: #fff;
+  font-size: 13px;
+  font-weight: 700;
+  border: none;
+  border-radius: 8px;
+  cursor: pointer;
+  font-family: inherit;
+  box-shadow: 0 2px 8px rgba(220,38,38,0.25);
+}
+
+.gis-btn-stop:hover {
+  background: #b91c1c;
+}
+
+.gis-btn-be-run {
+  width: 100%;
+  padding: 12px;
+  background: linear-gradient(135deg, #7c3aed 0%, #a855f7 100%);
+  color: #fff;
+  font-size: 14px;
+  font-weight: 700;
+  border: none;
+  border-radius: 8px;
+  cursor: pointer;
+  font-family: inherit;
+  box-shadow: 0 2px 8px rgba(124,58,237,0.25);
+}
+
+.gis-btn-be-run:hover:not(:disabled) {
+  box-shadow: 0 4px 14px rgba(124,58,237,0.35);
+  transform: translateY(-1px);
+}
+
+.gis-btn-be-run:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  transform: none;
+  box-shadow: none;
+}
+
+/* 右侧面板 */
+.gis-pipeline-right {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 16px 14px;
+  overflow: hidden;
+}
+
+/* 脚本编辑器 */
+.gis-editor {
+  flex: 1;
+  background: #ffffff;
+  border: 1px solid #e2e8f0;
+  border-radius: 10px;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.03);
+}
+
+.gis-editor-header {
+  padding: 8px 14px;
+  border-bottom: 1px solid #e2e8f0;
+  background: #f8fafc;
+}
+
+.gis-editor-dot {
+  font-size: 11px;
+  font-weight: 600;
+  color: #16a34a;
+  border: 1px solid #bbf7d0;
+  border-radius: 4px;
+  padding: 2px 8px;
+  background: #f0fdf4;
+}
+
+.gis-editor-text {
+  flex: 1;
+  background: #f8fafc;
+  color: #334155;
+  font-family: 'SF Mono', 'Cascadia Code', Consolas, monospace;
+  font-size: 11px;
+  line-height: 1.6;
+  border: none;
+  padding: 12px 14px;
+  resize: none;
+  outline: none;
+}
+
+/* 终端日志 */
+.gis-terminal {
+  height: 30%;
+  min-height: 150px;
+  background: #ffffff;
+  border: 1px solid #e2e8f0;
+  border-radius: 10px;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.03);
+}
+
+.gis-terminal-header {
+  padding: 6px 14px;
+  border-bottom: 1px solid #e2e8f0;
+  background: #f8fafc;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.gis-terminal-label {
+  font-size: 11px;
+  font-weight: 600;
+  color: #16a34a;
+}
+
+.gis-terminal-taskid {
+  font-size: 10px;
+  color: #94a3b8;
+}
+
+.gis-terminal-content {
+  flex: 1;
+  color: #334155;
+  font-family: 'SF Mono', 'Cascadia Code', Consolas, monospace;
+  font-size: 11px;
+  margin: 0;
+  padding: 10px 14px;
+  overflow-y: auto;
+  line-height: 1.4;
+  white-space: pre-wrap;
+  word-break: break-all;
+  background: #fafbfc;
+}
+
+/* 文件浏览器弹窗 */
+.gis-modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(15, 23, 42, 0.45);
+  backdrop-filter: blur(4px);
+  -webkit-backdrop-filter: blur(4px);
+  z-index: 9999;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+}
+
+.gis-modal {
+  background: #ffffff;
+  border: 1px solid #e2e8f0;
+  border-radius: 12px;
+  width: 100%;
+  max-width: 560px;
+  max-height: 75vh;
+  display: flex;
+  flex-direction: column;
+  box-shadow: 0 8px 40px rgba(15,23,42,0.12);
+}
+
+.gis-modal-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 16px;
+}
+
+.gis-modal-path {
+  color: #1e293b;
+  font-size: 12px;
+  margin-bottom: 12px;
+  word-break: break-all;
+  font-family: 'SF Mono', 'Cascadia Code', Consolas, monospace;
+}
+
+.gis-modal-count {
+  color: #2563eb;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.gis-modal-parent {
+  padding: 8px;
+  color: #2563eb;
+  cursor: pointer;
+  font-size: 12px;
+  border-radius: 6px;
+  transition: background 0.1s;
+  font-weight: 500;
+}
+
+.gis-modal-parent:hover {
+  background: #eff6ff;
+}
+
+/* 搜索与全选栏 */
+.gis-modal-search-bar {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin-bottom: 10px;
+  padding: 8px 0;
+  border-bottom: 1px solid #e2e8f0;
+}
+
+.gis-search-input {
+  flex: 1;
+  width: auto !important;
+  padding: 6px 10px !important;
+  font-size: 12px !important;
+}
+
+.gis-modal-dir {
+  padding: 8px;
+  color: #2563eb;
+  cursor: pointer;
+  font-size: 12px;
+  border-radius: 6px;
+  transition: background 0.1s;
+  font-weight: 500;
+}
+
+.gis-modal-dir:hover {
+  background: #eff6ff;
+}
+
+.gis-modal-file {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px;
+  color: #475569;
+  font-size: 12px;
+  cursor: pointer;
+  border-radius: 6px;
+  transition: background 0.1s;
+}
+
+.gis-modal-file:hover {
+  background: #f8fafc;
+}
+
+.gis-modal-file input[type="checkbox"] {
+  accent-color: #3b82f6;
+}
+
+.gis-modal-footer {
+  padding: 12px 16px;
+  border-top: 1px solid #e2e8f0;
+  display: flex;
+  justify-content: flex-end;
+}
+
+.gis-btn-modal-confirm {
+  background: linear-gradient(135deg, #0ea5e9 0%, #06b6d4 100%);
+  color: #fff;
+  border: none;
+  padding: 8px 28px;
+  border-radius: 8px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  font-family: inherit;
+  box-shadow: 0 2px 8px rgba(14,165,233,0.25);
+  transition: all 0.15s;
+}
+
+.gis-btn-modal-confirm:hover {
+  box-shadow: 0 4px 14px rgba(14,165,233,0.35);
+  transform: translateY(-1px);
+}
+
+.gis-btn-modal-confirm:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  transform: none;
+  box-shadow: none;
+}
+
+/* 滚动条 */
+.gis-pipeline-left::-webkit-scrollbar,
+.gis-modal-body::-webkit-scrollbar,
+.gis-terminal-content::-webkit-scrollbar {
+  width: 5px;
+}
+
+.gis-pipeline-left::-webkit-scrollbar-thumb,
+.gis-modal-body::-webkit-scrollbar-thumb,
+.gis-terminal-content::-webkit-scrollbar-thumb {
+  background: #cbd5e1;
+  border-radius: 4px;
+}
+
+.gis-pipeline-left::-webkit-scrollbar-thumb:hover,
+.gis-modal-body::-webkit-scrollbar-thumb:hover,
+.gis-terminal-content::-webkit-scrollbar-thumb:hover {
+  background: #94a3b8;
+}
+
+/* 切片发布联动：进度条与按钮 */
+.gis-publish-progress {
+  margin-top: 10px;
+  background: #e2e8f0;
+  border: 1px solid #cbd5e1;
+  border-radius: 8px;
+  height: 26px;
+  position: relative;
+  overflow: hidden;
+}
+
+.gis-publish-progress-bar {
+  height: 100%;
+  background: linear-gradient(90deg, #3b82f6, #8b5cf6);
+  border-radius: 8px 0 0 8px;
+  transition: width 0.5s ease;
+  min-width: 4px;
+}
+
+.gis-publish-progress-text {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #1e293b;
+  font-size: 11px;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  padding: 0 8px;
+}
+
+.gis-btn-publish {
+  margin: 10px 14px 14px;
+  width: calc(100% - 28px);
+  padding: 9px 0;
+  border: none;
+  border-radius: 8px;
+  background: linear-gradient(90deg, #7c3aed, #3b82f6);
+  color: #fff;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  font-family: inherit;
+  transition: all 0.15s;
+  box-shadow: 0 2px 8px rgba(124,58,237,0.2);
+}
+
+.gis-btn-publish:hover {
+  box-shadow: 0 4px 14px rgba(124,58,237,0.3);
+  transform: translateY(-1px);
+}
+
+.gis-btn-publish:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  transform: none;
+  box-shadow: none;
+}
+
+.gis-step-gold {
+  border-color: #e2e8f0;
+  border-left: 3px solid #f59e0b;
+}
+
+.gis-step-gold .gis-step-check {
+  color: #d97706;
+}
