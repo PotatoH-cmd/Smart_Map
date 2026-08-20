@@ -2,7 +2,7 @@
 """试生成单站报告：python run_one_caisha.py <site_name>"""
 import json, os, sys, time
 
-BACKEND_DIR = os.path.dirname(os.path.abspath(__file__))
+BACKEND_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, BACKEND_DIR)
 os.chdir(BACKEND_DIR)
 

@@ -166,7 +166,7 @@ map_assistant_v1/
 ### 1. 克隆与安装
 
 ```bash
-git clone https://github.com/PotatoH-cmd/map_assistant_v1.git
+git clone https://github.com/PotatoH-cmd/Smart_Map.git
 cd map_assistant_v1
 ```
 
