@@ -35,6 +35,26 @@
 
 <br>
 
+## 📑 目录
+
+- [🎬 它能做什么？](#-它能做什么)
+- [✨ 核心亮点](#-核心亮点)
+- [🏗️ 系统架构](#️-系统架构)
+- [🧠 记忆系统](#-记忆系统本项目核心竞争力)
+- [🗺️ 三地图引擎](#️-三地图引擎)
+- [🤖 智能体工作流](#-智能体工作流)
+- [🧰 工具武器库](#-工具武器库)
+- [📁 项目结构](#-项目结构)
+- [🚀 快速开始](#-快速开始)
+- [❓ FAQ](#-faq)
+- [🔌 API 一览](#-api-一览)
+- [🛡️ 生产可靠性](#️-生产可靠性)
+- [🗺️ Roadmap](#️-roadmap)
+- [🤝 贡献与交流](#-贡献与交流)
+- [📖 深入文档](#-深入文档)
+
+<br>
+
 ## 🎬 它能做什么？
 
 > 你说：“**加载北汝河采区的高分影像，叠加河道红线，再切到三维看看实景**”
@@ -53,7 +73,16 @@
 💬  回复     → "已加载 2023 年高分影像与河道红线，实景三维已就绪。"
 ```
 
-**这就是全部交互成本。**
+**这就是全部交互成本。** 更多典型场景：
+
+| 场景 | 你说 | 系统做 |
+|------|------|--------|
+| 🗺️ 图层调度 | “把 2026 年采区边界和测深数据加到地图上” | 意图解码 → 计划编排 → 多图层批量上图 |
+| 📊 数据问答 | “种子场可采区去年采了多少方？” | PostGIS 查询 → 图表渲染 → 结论解读 |
+| 📚 政策检索 | “采砂现场监管有什么要求？” | 混合检索 RAG → 精排 → 带出处回答 |
+| 🧪 空间分析 | “红线外 500 米缓冲区里有哪些采区？” | QGIS MCP 直驱 → 缓冲+叠加 → 结果上图 |
+| 🛰️ 遥感监测 | “对比这两期影像，河道有什么变化？” | SAM 分割 → 双时相差异 → 侵占预警 |
+| 📄 报告生成 | “出一份本月监测报告” | 多源数据融合 → Word 自动成文 |
 
 <br>
 
@@ -61,7 +90,7 @@
 
 | | 亮点 | 说明 |
 |---|:---|:---|
-| 🧠 | **双记忆智能体** | 短期记忆（上下文预算+滚动压缩）× 长期记忆（向量+图谱+事实），对话有上下文，跨会话有积累 |
+| 🧠 | **三层记忆智能体** | 短期记忆（上下文预算+滚动压缩）× 长期知识（向量+图谱）× 用户事实，对话有上下文，跨会话有积累 |
 | 🎯 | **混合检索 RAG** | Milvus 向量召回 + BM25(jieba) 关键词召回 → RRF 融合 → gte-rerank-v2 精排，中文召回质量拉满 |
 | 🌍 | **三地图引擎** | Leaflet 2D · Cesium 3D · GeoLibre 实景地球（iframe 嵌入，深链接动态注入图层） |
 | 🛰️ | **遥感 AI** | SAM/SAM3 分割，双时相影像变化检测，河道侵占自动识别 |
@@ -136,7 +165,7 @@ graph TB
 | 滚动压缩 | >12 轮触发 LLM 异步摘要，60s 去抖防重 |
 | 内存治理 | MemorySaver 200 线程上限 LRU 淘汰 · Run 数据 7 天 TTL |
 
-### 长期记忆 · 跨会话
+### 长期记忆 · 跨会话知识库
 
 ```text
 查询 → ① 向量召回(Milvus, top12) ─┐
@@ -186,8 +215,8 @@ flowchart LR
     I -->|"数据查询"| DA["📊 DataAgent"]
     I -->|"知识检索"| KA["📚 KnowledgeAgent"]
     I -->|"报告生成"| RA["📄 ReportAgent"]
-    I -->|"空间分析"| QA["🧪 QGIS Agent"]
-    MA & DA & KA & RA & QA --> T["🔧 15+ Tools"]
+    I -->|"兜底闲聊"| GA["💬 GeneralAgent"]
+    MA & DA & KA & RA & GA --> T["🔧 13 工具"]
     T --> R["📦 RunEngine<br/>事件流+检查点"]
     R -->|"map_commands"| M2D["🗺️ 2D"]
     R -->|"cesium_commands"| M3D["🌐 3D"]
@@ -199,6 +228,28 @@ flowchart LR
     style R fill:#dcfce7,stroke:#15803d
     style RC fill:#ffe4e6,stroke:#e11d48
 ```
+
+<br>
+
+## 🧰 工具武器库
+
+13 个注册工具，覆盖地图、数据、知识、分析、报告全链路：
+
+| 类别 | 工具 | 能力 |
+|------|------|------|
+| 🗺️ 地图 | `map_tool` | 图层加载/移除、视角飞行、要素高亮 |
+| | `coordinate_marker` | 坐标打点标注 |
+| | `location_search` | 地名/要素检索定位 |
+| | `cesium_tool` | 3D 场景调度 |
+| 📊 数据 | `postgresql_tool` / `mcp_postgres_tool` | PostGIS 空间查询 |
+| | `data_visualizer_tool` | ECharts 图表渲染 |
+| 📚 知识 | `knowledge_base_tool` | LlamaIndex 混合检索（RagFlow 可切换） |
+| 🧪 分析 | `qgis_mcp_tool` | QGIS 缓冲/叠加/裁剪等空间分析 |
+| | `spatial_processing_tool` | 矢量处理 |
+| | `spatial_reference_tool` | 坐标系转换 |
+| 📄 报告 | `report_generator_tool` | Word 报告生成 |
+| | `caisha_report_tool` | 采砂成果报告 |
+| 🛰️ 遥感 | SAM 分割模块 | 双时相变化检测（面板直调） |
 
 <br>
 
@@ -217,12 +268,7 @@ Smart_Map/
 │   │   ├── context_manager.py     # 上下文预算 · 滚动压缩
 │   │   ├── fact_memory.py         # 💎 用户事实记忆
 │   │   └── agent_harness.py       # Agent 分派中枢
-│   ├── tools/
-│   │   ├── llamaindex_knowledge_tool.py  # 混合检索 RAG
-│   │   ├── map_tool.py / cesium_tool.py  # 双引擎地图操作
-│   │   ├── qgis_mcp_tool.py             # QGIS 空间分析
-│   │   ├── sam_predict.py               # 遥感分割
-│   │   └── report_generator_tool.py     # Word 报告
+│   ├── tools/                     # 13 注册工具（见上表）
 │   ├── scripts/
 │   │   ├── backup_memory.sh       # 每日备份（DB+向量+图谱）
 │   │   ├── kb_rebuild.py          # 知识库三级恢复
@@ -308,6 +354,40 @@ cd backend && pm2 start ecosystem.config.js
 pm2 status                          # map-assistant-backend + frontend
 pm2 logs map-assistant-backend
 ```
+</details>
+
+<br>
+
+## ❓ FAQ
+
+<details>
+<summary>🔑 没有 DASHSCOPE_API_KEY 能跑吗？</summary>
+
+不能。LLM 意图识别、Embedding、Rerank 全部走 DashScope。在 `backend/.env` 填入后即可，其余组件均有降级链。
+</details>
+
+<details>
+<summary>🔷 没装 Milvus 会怎样？</summary>
+
+自动回退 SimpleVectorStore（本地 JSON 向量库），功能完整，仅大规模检索性能略低。BM25/Rerank 失败同样静默降级为纯向量。
+</details>
+
+<details>
+<summary>🌍 GeoLibre 地球打不开？</summary>
+
+GeoLibre 需独立部署（nginx 托管，默认 :8090），后端通过 `/api/geolibre/project` 动态注入图层。确认 `deploy/` 下 nginx 配置已启用且 CORS 放开。
+</details>
+
+<details>
+<summary>🧪 QGIS MCP 是必须的吗？</summary>
+
+可选。未部署时空间分析类意图会降级为数据查询+地图展示，其余功能不受影响。
+</details>
+
+<details>
+<summary>💾 数据丢了怎么恢复？</summary>
+
+`backend/scripts/kb_rebuild.py` 三级恢复：本地每日备份 → RagFlow 重建 → 空库可用；sessions.db 同样在每日备份轮转中。
 </details>
 
 <br>
