@@ -163,8 +163,17 @@ class IntentAgent:
         from .context_manager import build_history_context
         history_context = build_history_context(chat_history)
 
+        # 阶段D：用户事实记忆（跨会话长期记忆，≤500 字；失败静默为空）
+        facts_context = ""
+        try:
+            from .fact_memory import build_facts_context
+            facts_context = build_facts_context()
+        except Exception:
+            pass
+
         return f"""## 用户当前输入
 {user_message}
+{facts_context}
 {history_context}
 
 请分析上述用户输入，返回结构化的意图分析结果。"""

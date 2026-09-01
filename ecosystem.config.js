@@ -8,9 +8,9 @@ module.exports = {
   apps: [
     {
       name: 'map-assistant-backend',
-      script: '/home/server/miniconda3/envs/mapagent6/bin/python3',
+      script: '/home/szgczx/miniconda3/envs/mapagent6/bin/python3',
       args: 'main.py',
-      cwd: '/home/server/python/map_assistant_v1/backend',
+      cwd: '/home/szgczx/python/map_assistant_v1/backend',
       env: {
         // 灰度开关：on=新 RunEngine 路径，off=旧 execute_stream 路径（回退用）
         RUN_ENGINE: 'on',
@@ -22,7 +22,7 @@ module.exports = {
       name: 'map-assistant-frontend',
       script: 'npm',
       args: 'start',
-      cwd: '/home/server/python/map_assistant_v1/frontend',
+      cwd: '/home/szgczx/python/map_assistant_v1/frontend',
       env: {
         // CRA dev server 端口（3000 被其他容器占用，沿用历史端口 3004）
         PORT: '3004',

@@ -3,6 +3,7 @@ import os
 import json
 import logging
 import asyncio
+import math
 import traceback
 import re
 import base64
@@ -27,7 +28,7 @@ except Exception:
 cuda_devices = os.environ.get("CUDA_VISIBLE_DEVICES", "Not Set")
 logging.info(f"Current CUDA_VISIBLE_DEVICES: {cuda_devices}")
 from typing import List, Dict, Any, Optional
-from fastapi import FastAPI, HTTPException, Header, UploadFile, File, Form, Query
+from fastapi import FastAPI, HTTPException, Header, Request, UploadFile, File, Form, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -166,7 +167,19 @@ from contextlib import asynccontextmanager
 # ---------------------------------------------------------------------------
 # SQLite 会话持久化
 # ---------------------------------------------------------------------------
-DB_PATH = "/home/server/python/map_assistant_v1/backend/sessions.db"
+# 路径策略：优先环境变量 MAPASSIST_DB_PATH，默认项目 backend/sessions.db（不再硬编码旧机器路径）
+DB_PATH = os.environ.get(
+    "MAPASSIST_DB_PATH",
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "sessions.db"),
+)
+_LEGACY_DB_PATH = "/home/server/python/map_assistant_v1/backend/sessions.db"
+if not os.path.exists(DB_PATH) and os.path.exists(_LEGACY_DB_PATH):
+    # 一次性迁移：旧机器硬编码路径存在而新路径不存在时复制过来
+    try:
+        shutil.copy2(_LEGACY_DB_PATH, DB_PATH)
+        print(f"[init_db] 已从旧路径迁移 sessions.db: {_LEGACY_DB_PATH} -> {DB_PATH}")
+    except Exception as e:  # noqa: BLE001
+        print(f"[init_db] 旧 sessions.db 迁移失败（继续用新路径）: {e}")
 
 # PostgreSQL 连接配置（环境变量注入，见 .env GEOSERVER_PG_*）
 _PG_CONN = {
@@ -197,6 +210,23 @@ def init_db():
                 created_at TEXT NOT NULL
             )
         """)
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id, id)"
+        )
+        # 阶段D：用户事实记忆（跨会话长期记忆，全局共享）
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS user_facts (
+                id TEXT PRIMARY KEY,
+                content TEXT NOT NULL,
+                category TEXT,
+                evidence TEXT,
+                source_session TEXT,
+                hits INTEGER DEFAULT 0,
+                created_at TEXT,
+                updated_at TEXT,
+                last_seen_at TEXT
+            )
+        """)
         conn.commit()
 
 def get_db():
@@ -209,10 +239,30 @@ def now_iso():
     return dt.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+async def _daily_run_cleanup():
+    """每日清理过期 run 数据（终态且超 7 天）。"""
+    while True:
+        await asyncio.sleep(86400)
+        try:
+            removed = get_run_store().cleanup(keep_days=7)
+            if removed:
+                logger.info(f"[run-cleanup] 已清理 {removed} 个过期 run 及其事件/检查点")
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"[run-cleanup] 清理失败: {e}")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global task_executor, bot
     init_db()
+    # 启动时清理过期 run 数据，并启动每日定时清理
+    try:
+        removed = get_run_store().cleanup(keep_days=7)
+        if removed:
+            logger.info(f"[lifespan] 启动清理：移除 {removed} 个过期 run")
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"[lifespan] run 清理失败: {e}")
+    app.state.run_cleanup_task = asyncio.create_task(_daily_run_cleanup())
     task_executor = init_task_executor()
     bot = init_agent()
     yield
@@ -1562,6 +1612,7 @@ async def chat(request: ChatRequest, x_session_id: Optional[str] = Header(defaul
 
             # 持久化 intent agent 结果
             _persist_chat(thread_id, messages[-1]['content'], result.get("response", ""))
+            _schedule_fact_extraction(thread_id, messages[-1]['content'], result.get("response", ""))
 
             optimized_map_commands = _optimize_map_commands(messages[-1]['content'], result.get("map_commands", []))
             optimized_charts = _optimize_charts(result.get("charts", []))
@@ -1681,7 +1732,8 @@ async def chat(request: ChatRequest, x_session_id: Optional[str] = Header(defaul
 
         # 持久化消息到 SQLite（仅当 thread_id 是有效 UUID 会话时）
         _persist_chat(thread_id, messages[-1]['content'], response_text)
-        
+        _schedule_fact_extraction(thread_id, messages[-1]['content'], response_text)
+
         return ChatResponse(
             response=response_text,
             messages=response_messages, # 返回完整的对话历史，包括工具执行结果
@@ -1888,6 +1940,7 @@ async def chat_stream(request: ChatRequest, x_session_id: Optional[str] = Header
                             )
                             result["charts"] = _optimize_charts(result.get("charts", []))
                             _persist_chat(thread_id, user_text, result.get("response", ""))
+                            _schedule_fact_extraction(thread_id, user_text, result.get("response", ""))
                             yield sse_payload({"type": "final", "result": result})
                             break
                         yield sse_payload(event)
@@ -1911,6 +1964,7 @@ async def chat_stream(request: ChatRequest, x_session_id: Optional[str] = Header
                         result["map_commands"] = _optimize_map_commands(user_text, result.get("map_commands", []))
                         result["charts"] = _optimize_charts(result.get("charts", []))
                         _persist_chat(thread_id, user_text, result.get("response", ""))
+                        _schedule_fact_extraction(thread_id, user_text, result.get("response", ""))
                         yield sse_payload({"type": "final", "result": result})
                     else:
                         yield sse_payload(event)
@@ -2028,6 +2082,7 @@ async def chat_stream(request: ChatRequest, x_session_id: Optional[str] = Header
             map_commands = _optimize_map_commands(messages[-1]['content'], map_commands)
             charts = _optimize_charts(charts)
             _persist_chat(thread_id, messages[-1]['content'], response_text)
+            _schedule_fact_extraction(thread_id, messages[-1]['content'], response_text)
 
             yield sse_payload({
                 "type": "final",
@@ -2043,6 +2098,9 @@ async def chat_stream(request: ChatRequest, x_session_id: Optional[str] = Header
             yield "data: [DONE]\n\n"
         except HTTPException as e:
             message = e.detail if isinstance(e.detail, str) else "请求处理失败"
+            # 失败轮次也落库，避免 DB 历史断档
+            if messages:
+                _persist_chat(thread_id, messages[-1]['content'], message)
             yield sse_payload({"type": "error", "stage": "error", "message": message})
             yield sse_payload({
                 "type": "final",
@@ -2059,6 +2117,9 @@ async def chat_stream(request: ChatRequest, x_session_id: Optional[str] = Header
         except Exception as e:
             logger.error(f"Chat stream error: {e}\n{traceback.format_exc()}")
             message = f"内部服务器错误：{str(e)}"
+            # 失败轮次也落库，避免 DB 历史断档
+            if messages:
+                _persist_chat(thread_id, messages[-1]['content'], message)
             yield sse_payload({"type": "error", "stage": "error", "message": message})
             yield sse_payload({
                 "type": "final",
@@ -2138,6 +2199,202 @@ async def cancel_run(run_id: str):
 from tools.overlay_tile_service import get_tile_png as _overlay_get_tile_png, list_layers as _overlay_list_layers, query_feature as _overlay_query_feature, register_layer as _overlay_register_layer, unregister_layer as _overlay_unregister_layer
 from tools import geoserver_client as _gs_client
 from tools.geoserver_client import GeoServerUnavailable as _GeoServerUnavailable
+
+# GeoLibre 图层工作台默认样式（与 GeoLibre 项目 schema 对齐）
+_GEOLIBRE_STYLE = {
+    "minZoom": 0, "maxZoom": 24,
+    "fillColor": "#1d4ed8", "strokeColor": "#1e3a8a", "strokeWidth": 2, "fillOpacity": 0.25,
+    "circleRadius": 6, "textColor": "#111827", "textHaloColor": "#ffffff",
+    "textHaloWidth": 2, "textSize": 16,
+    "extrusionEnabled": False, "extrusionColor": "#3b82f6", "extrusionOpacity": 0.8,
+    "extrusionHeightProperty": "height", "extrusionHeightScale": 1, "extrusionBase": 0,
+    "extrusionAdvancedStyleEnabled": False, "extrusionColorExpression": "",
+    "extrusionHeightExpression": "", "vectorStyleMode": "single", "vectorStyleProperty": "",
+    "vectorStyleClassCount": 5, "vectorStyleColorRamp": "viridis",
+    "vectorStyleClassificationScheme": "equal-interval",
+    "vectorStyleStops": [{"value": 0, "color": "#dbeafe"}, {"value": 1, "color": "#2563eb"}],
+    "vectorStyleExpression": "", "pointRenderer": "single",
+    "heatmapRadius": 30, "heatmapIntensity": 1, "clusterRadius": 50, "clusterMaxZoom": 14,
+    "rasterBrightnessMin": 0, "rasterBrightnessMax": 1, "rasterSaturation": 0,
+    "rasterContrast": 0, "rasterHueRotate": 0,
+}
+
+
+def _compute_3dtiles_ground_offset(tileset_path: str) -> float:
+    """估算 3D Tiles 在 GeoLibre（地表为 0m 椭球面）中的贴地 altitudeOffset（米，负值=下移）。
+
+    maplibre-gl-3d-tiles 以根节点包围体中心为锚点放置模型，因此
+    偏移量 = -(包围体中心海拔 - 包围体垂直半高)，将包围体底面压到 0m 地表。
+    """
+    try:
+        from pyproj import Transformer
+
+        with open(tileset_path, "r", encoding="utf-8") as fh:
+            t = json.load(fh)
+        root = t.get("root") or {}
+        tr = root.get("transform")
+        if not tr or len(tr) < 12:
+            return 0.0
+        tx, ty, tz = tr[12], tr[13], tr[14]
+        n = math.sqrt(tx * tx + ty * ty + tz * tz) or 1.0
+        up = (tx / n, ty / n, tz / n)
+        bv = root.get("boundingVolume") or {}
+        if "box" in bv and len(bv["box"]) == 12:
+            b = bv["box"]
+            # 包围盒世界中心 = R @ local_center + t（transform 为 column-major）
+            cx = tr[0] * b[0] + tr[4] * b[1] + tr[8] * b[2] + tx
+            cy = tr[1] * b[0] + tr[5] * b[1] + tr[9] * b[2] + ty
+            cz = tr[2] * b[0] + tr[6] * b[1] + tr[10] * b[2] + tz
+            # 垂直半高 = 三个半轴在 up 方向投影绝对值之和
+            vhalf = 0.0
+            for i, half in enumerate((b[3], b[7], b[11])):
+                col = (tr[4 * i], tr[4 * i + 1], tr[4 * i + 2])
+                ln = math.sqrt(col[0] ** 2 + col[1] ** 2 + col[2] ** 2) or 1.0
+                vhalf += abs(half) * abs(col[0] * up[0] + col[1] * up[1] + col[2] * up[2]) / ln
+        elif "sphere" in bv and len(bv["sphere"]) == 4:
+            s = bv["sphere"]
+            cx = tr[0] * s[0] + tr[4] * s[1] + tr[8] * s[2] + tx
+            cy = tr[1] * s[0] + tr[5] * s[1] + tr[9] * s[2] + ty
+            cz = tr[2] * s[0] + tr[6] * s[1] + tr[10] * s[2] + tz
+            vhalf = abs(s[3])
+        else:
+            cx, cy, cz = tx, ty, tz
+            vhalf = 0.0
+        _lon, _lat, alt = Transformer.from_crs(
+            "EPSG:4978", "EPSG:4979", always_xy=True
+        ).transform(cx, cy, cz)
+        bottom = alt - vhalf
+        return round(-bottom) if bottom > 0 else 0.0
+    except Exception as exc:
+        logging.warning("计算 3D Tiles 贴地偏移失败 %s: %s", tileset_path, exc)
+        return 0.0
+
+
+@app.get("/api/geolibre/project")
+async def geolibre_project(request: Request):
+    """为 GeoLibre 图层工作台动态生成 .geolibre.json 项目。
+
+    预置四个图层：2023年高分影像、河道红线、2026年采区边界、北汝河实景三维。
+    host 依据请求动态拼接，保证 GeoLibre(8090) 内各图层 URL 指向当前服务器。
+    """
+    base = f"{request.url.scheme}://{request.url.netloc}"
+
+    # 读取 2026 年采区边界（geojson 内嵌；数据量小，直接嵌入项目）
+    overlay_data_dir = os.environ.get(
+        "MAP_OVERLAY_DATA_DIR",
+        "/home/server/python/map_assistant_v1/frontend/public/data",
+    )
+    caiqu2026_path = os.path.join(overlay_data_dir, "caiqu2026.geojson")
+    caiqu2026 = {"type": "FeatureCollection", "features": []}
+    if os.path.isfile(caiqu2026_path):
+        try:
+            with open(caiqu2026_path, "r", encoding="utf-8") as fh:
+                caiqu2026 = json.load(fh)
+        except Exception as exc:
+            logging.warning(f"读取 caiqu2026.geojson 失败: {exc}")
+
+    # 北汝河 3D Tiles 贴地偏移：GeoLibre 地表为 0m 椭球面，按包围盒底面下移
+    _beiruhe_meta = _load_3dtiles_registry().get("jiaxian-beiruhe") or {}
+    _beiruhe_dir = _beiruhe_meta.get("directory") or os.path.join(_3DTILES_DATA_DIR, "jiaxian-beiruhe")
+    beiruhe_offset = _compute_3dtiles_ground_offset(os.path.join(_beiruhe_dir, "tileset.json"))
+
+    layers = [
+        {
+            "id": "geolibre-gf-2023",
+            "name": "2023年高分影像",
+            "type": "xyz",
+            "visible": True,
+            "opacity": 1,
+            "style": _GEOLIBRE_STYLE,
+            "metadata": {"sourceKind": "xyz-url"},
+            "source": {
+                "type": "raster",
+                "tiles": [f"{base}/proxy/gf2023-tiles/{{z}}/{{y}}/{{x}}"],
+                "tileSize": 256,
+                "url": f"{base}/proxy/gf2023-tiles/{{z}}/{{y}}/{{x}}",
+                "attribution": "2023年高分影像",
+                "maxzoom": 18,
+            },
+        },
+        {
+            "id": "geolibre-hx",
+            "name": "河道红线",
+            "type": "xyz",
+            "visible": True,
+            "opacity": 1,
+            "style": _GEOLIBRE_STYLE,
+            "metadata": {"sourceKind": "xyz-url"},
+            "source": {
+                "type": "raster",
+                "tiles": [f"{base}/api/overlay_tile/hx/{{z}}/{{x}}/{{y}}.png"],
+                "tileSize": 256,
+                "url": f"{base}/api/overlay_tile/hx/{{z}}/{{x}}/{{y}}.png",
+                "attribution": "河道红线",
+                "maxzoom": 18,
+            },
+        },
+        {
+            "id": "geolibre-caiqu-2026",
+            "name": "2026年采区边界",
+            "type": "geojson",
+            "visible": True,
+            "opacity": 1,
+            "style": {
+                **_GEOLIBRE_STYLE,
+                "fillColor": "#1d4ed8",
+                "strokeColor": "#1e3a8a",
+                "fillOpacity": 0.3,
+                "strokeWidth": 2,
+            },
+            "metadata": {},
+            "source": {"type": "geojson"},
+            "geojson": caiqu2026,
+        },
+        {
+            "id": "geolibre-beiruhe-3dtiles",
+            "name": "北汝河实景三维",
+            "type": "3d-tiles",
+            "visible": True,
+            "opacity": 1,
+            "style": _GEOLIBRE_STYLE,
+            "metadata": {
+                "sourceKind": "3d-tiles-url",
+                "externalNativeLayer": True,
+                "customLayerType": "3d-tiles",
+                "identifiable": False,
+            },
+            "source": {
+                "type": "3d-tiles",
+                "url": f"{base}/api/3dtiles/jiaxian-beiruhe/tileset.json",
+                "altitudeOffset": beiruhe_offset,
+            },
+            "sourcePath": f"{base}/api/3dtiles/jiaxian-beiruhe/tileset.json",
+        },
+    ]
+
+    return {
+        "version": "0.1.0",
+        "name": "豫水智能一张图 - 图层工作台",
+        "mapView": {"center": [114.0, 32.1], "zoom": 11, "bearing": 0, "pitch": 0},
+        "basemapStyleUrl": "https://tiles.openfreemap.org/styles/liberty",
+        "basemapVisible": True,
+        "basemapOpacity": 1,
+        "layers": layers,
+        "styles": {},
+        "preferences": {
+            "map": {
+                "restrictBounds": False,
+                "bounds": [-180, -85, 180, 85],
+                "minZoom": 0,
+                "maxZoom": 24,
+                "maxPitch": 85,
+                "renderWorldCopies": True,
+            },
+            "environmentVariables": [],
+        },
+        "metadata": {"generated_by": "yushui_map_assistant"},
+    }
+
 
 @app.get("/api/overlay_tile/{layer}/{z}/{x}/{y}.png")
 async def overlay_tile(layer: str, z: int, x: int, y: int):
@@ -3286,6 +3543,13 @@ async def geoserver_seed_status(layer: str):
         raise HTTPException(status_code=502, detail=f"GWC 状态查询失败: {e}")
 
 
+@app.get("/proxy/gf2023-tiles/{z}/{y}/{x}")
+async def proxy_gf2023_tiles(z: int, y: int, x: int):
+    """代理 2023年高分影像 GF_202308_cache 瓦片 (ArcGIS MapServer)"""
+    url = f"http://123.149.20.94:60805/arcgis/rest/services/%E9%AB%98%E5%88%86%E5%BD%B1%E5%83%8F/GF_202308_cache/MapServer/tile/{z}/{y}/{x}"
+    return await _proxy_arcgis_tile(url)
+
+
 @app.get("/proxy/gf2026-tiles/{z}/{y}/{x}")
 async def proxy_gf2026_tiles(z: int, y: int, x: int):
     """代理 2026年Q1 本地 GeoTIFF 高分影像瓦片 → serve_tile.py (port 8090)"""
@@ -3643,6 +3907,43 @@ async def delete_knowledge(kb_id: str):
         logger.error(f"Delete knowledge error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
+
+@app.get("/api/memory/facts")
+async def list_user_facts(q: str = ""):
+    """查看用户事实记忆（阶段D，支持 q 关键字过滤）。"""
+    from agents.fact_memory import list_facts
+    try:
+        facts = list_facts(q=q or None)
+        return {"success": True, "total": len(facts), "facts": facts}
+    except Exception as e:
+        logger.error(f"List facts error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.delete("/api/memory/facts/{fact_id}")
+async def delete_user_fact(fact_id: str):
+    """删除指定用户事实记忆。"""
+    from agents.fact_memory import delete_fact
+    try:
+        if not delete_fact(fact_id):
+            raise HTTPException(status_code=404, detail="事实不存在")
+        return {"success": True, "id": fact_id}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Delete fact error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+
+def _schedule_fact_extraction(session_id: str, user_text: str, assistant_text: str):
+    """run 成功收尾后 fire-and-forget 抽取用户事实记忆（阶段D）。同步/异步上下文通吃。"""
+    try:
+        from agents.fact_memory import extract_and_store_async
+        llm = getattr(task_executor, "_llm", None) if task_executor is not None else None
+        extract_and_store_async(session_id, user_text, assistant_text, llm)
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"[fact-memory] 调度失败: {e}")
 
 
 def _persist_chat(session_id: str, user_content: str, assistant_content: str):

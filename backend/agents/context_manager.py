@@ -11,17 +11,20 @@ context_manager.py — 上下文预算与压缩（阶段4）。
 （失败静默降级为截断），对齐文章 context budget / step context pack 方向。
 """
 import logging
+import os
+import time
 from typing import Any, Callable, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
-# ── 预算常量（集中管理，禁止散落魔法数字）──
+# ── 预算常量（集中管理，禁止散落魔法数字；支持环境变量覆盖）──
 BUDGET_WORKSPACE_CHARS = 800       # workspace 摘要上限
-BUDGET_HISTORY_TURNS = 6           # 最近历史轮数（每轮 = 1 user + 1 assistant）
-BUDGET_HISTORY_PER_MSG = 100       # 每条历史消息上限（字）
+BUDGET_HISTORY_TURNS = int(os.environ.get("CONTEXT_HISTORY_TURNS", "8"))       # 最近历史轮数（每轮 = 1 user + 1 assistant）
+BUDGET_HISTORY_PER_MSG = int(os.environ.get("CONTEXT_HISTORY_PER_MSG", "160"))  # 每条历史消息上限（字）
 BUDGET_TOOL_RESULTS_CHARS = 4000   # 工具结果总预算（字）
 COMPRESS_THRESHOLD_TURNS = 12      # 超过该轮数触发滚动摘要压缩
 LAST_SUMMARY_CHARS = 300           # 滚动摘要长度
+COMPRESS_DEBOUNCE_SECONDS = 60     # 同会话两次压缩的最小间隔（去抖）
 
 # 工具结果裁剪优先级（分值越高越优先保留）
 _TOOL_PRIORITY_RULES = (
@@ -114,6 +117,8 @@ class ContextManager:
 
     def __init__(self, workspace=None):
         self.workspace = workspace
+        self._compress_inflight: set = set()     # 正在压缩的 session（去抖）
+        self._last_compress_at: Dict[str, float] = {}  # session -> 上次压缩时刻
 
     # ------------------------------------------------------------------
     # 实例级入口（供 TaskExecutor / intent_agent 调用）
@@ -147,7 +152,7 @@ class ContextManager:
         chat_history: Optional[List[Dict]] = None,
         tool_summaries: Optional[List[str]] = None,
     ) -> Dict[str, str]:
-        """返回分层上下文：workspace 摘要 / 历史上下文 / 裁剪后的工具结果。"""
+        """返回分层上下文：workspace 摘要 / 用户长期记忆 / 历史上下文 / 裁剪后的工具结果。"""
         ws_summary = ""
         if self.workspace is not None:
             try:
@@ -156,8 +161,16 @@ class ContextManager:
                 logger.warning(f"[ContextManager] workspace summary failed: {e}")
         history_ctx = build_history_context(chat_history)
         trimmed = trim_tool_summaries(tool_summaries or [])
+        # 阶段D：用户事实记忆注入（失败静默为空，不阻断）
+        try:
+            from .fact_memory import build_facts_context
+            facts_ctx = build_facts_context()
+        except Exception as e:
+            logger.warning(f"[ContextManager] facts context failed: {e}")
+            facts_ctx = ""
         return {
             "workspace_summary": ws_summary,
+            "facts_context": facts_ctx,
             "history_context": history_ctx,
             "tool_summaries": trimmed,
         }
@@ -176,7 +189,31 @@ class ContextManager:
 
         失败静默降级为截断（不抛异常）。llm 为 LangChain ChatOpenAI 兼容对象，
         为 None 时退化为简单截断拼接。
+        去抖：同会话压缩进行中或 COMPRESS_DEBOUNCE_SECONDS 内已压缩过则跳过。
         """
+        if not session_id or session_id == "default" or not messages:
+            return False
+        now = time.monotonic()
+        if (session_id in self._compress_inflight
+                or now - self._last_compress_at.get(session_id, 0.0) < COMPRESS_DEBOUNCE_SECONDS):
+            return False
+        user_msgs = [m for m in messages if m.get("role") == "user"]
+        if len(user_msgs) <= COMPRESS_THRESHOLD_TURNS:
+            return False
+
+        self._compress_inflight.add(session_id)
+        try:
+            return await self._do_compress_history(session_id, messages, llm)
+        finally:
+            self._compress_inflight.discard(session_id)
+            self._last_compress_at[session_id] = time.monotonic()
+
+    async def _do_compress_history(
+        self,
+        session_id: str,
+        messages: List[Dict],
+        llm=None,
+    ) -> bool:
         if not session_id or session_id == "default" or not messages:
             return False
         user_msgs = [m for m in messages if m.get("role") == "user"]

@@ -95,8 +95,24 @@ export default function useAgentChat({ onFinal, onAssistantMessage, onConnection
   const onConnectionErrorRef = useRef(onConnectionError);
   onConnectionErrorRef.current = onConnectionError;
 
+  const terminalTimerRef = useRef(null);
+
   const setPhaseBoth = useCallback((p) => {
     phaseRef.current = p;
+    // 终态（完成/失败/取消）短暂展示后自动消失：重置 idle 使 RunStatusBar 卸载，
+    // 同时清空进度时间线，让整个加载块从消息流中收起
+    if (terminalTimerRef.current) {
+      clearTimeout(terminalTimerRef.current);
+      terminalTimerRef.current = null;
+    }
+    if (TERMINAL_PHASES.has(p)) {
+      terminalTimerRef.current = setTimeout(() => {
+        terminalTimerRef.current = null;
+        phaseRef.current = AGENT_PHASE.IDLE;
+        setPhase(AGENT_PHASE.IDLE);
+        setProgress([]);
+      }, 1500);
+    }
     setPhase(p);
   }, []);
 
@@ -204,6 +220,11 @@ export default function useAgentChat({ onFinal, onAssistantMessage, onConnection
   }, [stopFallbackProgress]);
 
   useEffect(() => () => stopFallbackProgress(), [stopFallbackProgress]);
+
+  // 卸载时清理终态自动消失定时器
+  useEffect(() => () => {
+    if (terminalTimerRef.current) clearTimeout(terminalTimerRef.current);
+  }, []);
 
   // ------------------------------------------------------------------
   // 错误映射（自 App.jsx catch 块逐行迁移）

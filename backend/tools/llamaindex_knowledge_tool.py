@@ -113,6 +113,9 @@ class KnowledgeBaseTool(BaseTool):
         self._index = None
         self._initialized = False
 
+        # BM25 检索器缓存（(文档数, retriever)，文档增删后自动重建）
+        self._bm25_cache = None
+
         # RagFlow fallback 配置（用于降级）
         self._ragflow_api_key = os.environ.get(
             "RAGFLOW_API_KEY", "ragflow-jZ-6x-X_PGr5ULHFSPqWhfbmd-0xlU_naoGg0hLc3K0"
@@ -149,8 +152,41 @@ class KnowledgeBaseTool(BaseTool):
 
             os.makedirs(self._persist_dir, exist_ok=True)
 
-            # 尝试从持久化目录加载已有索引
-            if os.path.exists(os.path.join(self._persist_dir, "docstore.json")):
+            has_local = os.path.exists(os.path.join(self._persist_dir, "docstore.json"))
+
+            # 向量后端：milvus（默认，不可用自动回退 simple）/ simple
+            vector_backend = os.environ.get("KB_VECTOR_BACKEND", "milvus").lower()
+            storage_context = None
+            if vector_backend == "milvus":
+                try:
+                    from llama_index.vector_stores.milvus import MilvusVectorStore
+                    milvus_store = MilvusVectorStore(
+                        uri=os.environ.get("MILVUS_URI", "http://127.0.0.1:19530"),
+                        collection=os.environ.get("KB_MILVUS_COLLECTION", "map_kb"),
+                        dim=int(os.environ.get("KB_EMBED_DIM", "1024")),
+                        overwrite=False,
+                    )
+                    if has_local:
+                        # docstore/index_store 仍取本地 JSON，向量走 Milvus
+                        storage_context = StorageContext.from_defaults(
+                            persist_dir=self._persist_dir, vector_store=milvus_store
+                        )
+                        self._index = load_index_from_storage(storage_context)
+                        logger.info(f"[LlamaIndex] 已加载索引（向量后端=Milvus, persist={self._persist_dir}）")
+                    else:
+                        storage_context = StorageContext.from_defaults(vector_store=milvus_store)
+                        self._index = VectorStoreIndex.from_documents(
+                            [], storage_context=storage_context
+                        )
+                        self._index.storage_context.persist(persist_dir=self._persist_dir)
+                        logger.info(f"[LlamaIndex] 已创建空索引（向量后端=Milvus）")
+                    self._initialized = True
+                    return True
+                except Exception as e:
+                    logger.warning(f"[LlamaIndex] Milvus 后端不可用（{e}），回退 simple 后端")
+
+            # simple 后端（默认行为）
+            if has_local:
                 try:
                     storage_context = StorageContext.from_defaults(
                         persist_dir=self._persist_dir
@@ -231,14 +267,12 @@ class KnowledgeBaseTool(BaseTool):
 
         if self._ensure_initialized():
             try:
-                # 需要过滤项目时适当多召回，过滤后再截断到 top_k
-                fetch_k = max(top_k * 5, 30) if project else top_k
-                retriever = self._index.as_retriever(similarity_top_k=fetch_k)
-                nodes = retriever.retrieve(query)
+                # 需要过滤项目时适当多召回，过滤后再精排截断到 top_k
+                fetch_k = max(top_k * 5, 30) if project else max(top_k * 2, 12)
+                nodes = self._retrieve_hybrid(query, fetch_k)
 
                 if project:
                     nodes = [n for n in nodes if (n.metadata or {}).get('project') == project]
-                    nodes = nodes[:top_k]
 
                 results = []
                 for node in nodes:
@@ -251,12 +285,17 @@ class KnowledgeBaseTool(BaseTool):
                         'metadata': node.metadata,
                     })
 
+                # 精排截断：rerank 失败/关闭时保持融合原序
+                if len(results) > top_k:
+                    reranked = self._rerank(query, results, top_k)
+                    results = reranked if reranked is not None else results[:top_k]
+
                 logger.info(f"[LlamaIndex] 检索 '{query[:60]}'（project={project or '全部'}）→ {len(results)} 条结果")
                 return {
                     'success': True,
                     'data': results,
                     'count': len(results),
-                    'method': 'LlamaIndex Retrieval'
+                    'method': 'LlamaIndex Hybrid Retrieval'
                 }
             except Exception as e:
                 logger.error(f"[LlamaIndex] 检索失败: {e}，降级到 RagFlow")
@@ -265,6 +304,101 @@ class KnowledgeBaseTool(BaseTool):
 
         # LlamaIndex 不可用时降级到 RagFlow HTTP
         return self._ragflow_fallback_search(query)
+
+    # ─────────────────────────────────────────────
+    # 混合检索（向量 + BM25）与重排
+    # ─────────────────────────────────────────────
+
+    def _get_bm25_retriever(self):
+        """BM25 检索器（jieba 分词），按文档数缓存，增删文档后自动重建；不可用返回 None。"""
+        try:
+            from llama_index.retrievers.bm25 import BM25Retriever
+            import jieba
+        except Exception as e:
+            logger.warning(f"[LlamaIndex] BM25 依赖不可用: {e}")
+            return None
+        try:
+            doc_count = len(self._index.docstore.docs)
+            if self._bm25_cache and self._bm25_cache[0] == doc_count:
+                return self._bm25_cache[1]
+            retriever = BM25Retriever.from_defaults(
+                docstore=self._index.docstore,
+                tokenizer=jieba.lcut,
+                similarity_top_k=50,  # 多召回供融合层截断
+            )
+            self._bm25_cache = (doc_count, retriever)
+            logger.info(f"[LlamaIndex] BM25 索引已构建（{doc_count} 个节点，jieba 分词）")
+            return retriever
+        except Exception as e:
+            logger.warning(f"[LlamaIndex] BM25 索引构建失败: {e}")
+            return None
+
+    def _retrieve_hybrid(self, query: str, fetch_k: int):
+        """向量 + BM25(jieba) RRF 融合召回；BM25 不可用时降级纯向量。
+
+        不用 QueryFusionRetriever：其构造会 resolve Settings.llm（默认 OpenAI），
+        无 OPENAI_API_KEY 时报错退化。RRF 即其 SIMPLE 融合模式的标准算法。
+        """
+        vector_retriever = self._index.as_retriever(similarity_top_k=fetch_k)
+        bm25_retriever = self._get_bm25_retriever()
+        if bm25_retriever is None:
+            return vector_retriever.retrieve(query)
+        try:
+            vec_nodes = vector_retriever.retrieve(query)
+            bm_nodes = bm25_retriever.retrieve(query)
+        except Exception as e:
+            logger.warning(f"[LlamaIndex] 双路召回失败，退化为纯向量: {e}")
+            return vector_retriever.retrieve(query)
+
+        # Reciprocal Rank Fusion（k=60，与 QueryFusionRetriever SIMPLE 模式一致）
+        rrf_k = 60
+        scores: Dict[str, float] = {}
+        nodes_by_id: Dict[str, Any] = {}
+        for nodes in (vec_nodes, bm_nodes):
+            for rank, node in enumerate(nodes):
+                nid = node.node_id
+                scores[nid] = scores.get(nid, 0.0) + 1.0 / (rrf_k + rank + 1)
+                if nid not in nodes_by_id:
+                    nodes_by_id[nid] = node
+        ranked = sorted(nodes_by_id.values(), key=lambda n: scores.get(n.node_id, 0.0), reverse=True)
+        return ranked[:fetch_k]
+
+    def _rerank(self, query: str, results: List[Dict[str, Any]], top_k: int) -> Optional[List[Dict[str, Any]]]:
+        """DashScope gte-rerank-v2 精排；关闭/失败返回 None（调用方保持原序截断）。"""
+        if os.environ.get("KB_RERANK", "1") != "1":
+            return None
+        if not self._api_key or not results:
+            return None
+        try:
+            import httpx
+            resp = httpx.post(
+                "https://dashscope.aliyuncs.com/api/v1/services/rerank/text-rerank/text-rerank",
+                headers={"Authorization": f"Bearer {self._api_key}"},
+                json={
+                    "model": "gte-rerank-v2",
+                    "input": {
+                        "query": query[:2000],
+                        "documents": [r["content"][:1000] for r in results],
+                    },
+                    "parameters": {"return_documents": False, "top_n": top_k},
+                },
+                timeout=10,
+            )
+            resp.raise_for_status()
+            items = ((resp.json().get("output") or {}).get("results")) or []
+            reranked = []
+            for item in items:
+                idx = item.get("index")
+                if idx is None or not (0 <= idx < len(results)):
+                    continue
+                row = dict(results[idx])
+                row["relevance"] = round(float(item.get("relevance_score", row["relevance"])), 4)
+                row["reranked"] = True
+                reranked.append(row)
+            return reranked or None
+        except Exception as e:
+            logger.warning(f"[LlamaIndex] rerank 失败（保持原序）: {e}")
+            return None
 
     # ─────────────────────────────────────────────
     # 文档列表
@@ -381,6 +515,26 @@ class KnowledgeBaseTool(BaseTool):
             from llama_index.core import Document
             from datetime import datetime as dt
 
+            # 增量更新：内容相同直接跳过；同名不同内容按替换语义删旧插新
+            content_hash = self._content_hash(content)
+            existing = self._kb_lookup("content_hash", content_hash)
+            if existing:
+                return {
+                    'success': True,
+                    'document_id': existing["doc_id"],
+                    'name': existing["name"],
+                    'dedup': True,
+                    'message': f"内容与已有文档「{existing['name']}」相同，已跳过（doc_id={existing['doc_id']}）"
+                }
+            same_name = self._kb_lookup("name", name)
+            if same_name and same_name.get("content_hash") != content_hash:
+                try:
+                    self._index.delete_ref_doc(same_name["doc_id"], delete_from_docstore=True)
+                except Exception:
+                    pass
+                self._kb_delete(same_name["doc_id"])
+                logger.info(f"[LlamaIndex] 同名替换: 删除旧文档 '{name}' ({same_name['doc_id']})")
+
             doc_id = f"doc_{abs(hash(name + content))}_{int(dt.now().timestamp())}"
             doc = Document(
                 text=content,
@@ -394,6 +548,7 @@ class KnowledgeBaseTool(BaseTool):
 
             self._index.insert(doc)
             self._index.storage_context.persist(persist_dir=self._persist_dir)
+            self._kb_record(doc_id, name, content_hash, chunk_count=1, source="add_document")
 
             logger.info(f"[LlamaIndex] 添加文档 '{name}' → {doc_id}")
             return {
@@ -421,6 +576,7 @@ class KnowledgeBaseTool(BaseTool):
         try:
             self._index.delete_ref_doc(document_id, delete_from_docstore=True)
             self._index.storage_context.persist(persist_dir=self._persist_dir)
+            self._kb_delete(document_id)
 
             logger.info(f"[LlamaIndex] 删除文档: {document_id}")
             return {
@@ -458,6 +614,25 @@ class KnowledgeBaseTool(BaseTool):
             if not documents:
                 return {'success': False, 'error': f'无法解析文件: {file_path}'}
 
+            # 增量更新：按解析出的正文 hash 去重；同名不同内容按替换语义清理旧节点
+            content_text = "\n".join(d.get_content() for d in documents)
+            content_hash = self._content_hash(content_text)
+            existing = self._kb_lookup("content_hash", content_hash)
+            if existing:
+                return {
+                    'success': True,
+                    'document_id': existing["doc_id"],
+                    'name': existing["name"],
+                    'dedup': True,
+                    'message': f"文件内容与已有文档「{existing['name']}」相同，已跳过"
+                }
+            same_name = self._kb_lookup("name", file_name)
+            if same_name:
+                removed = self._delete_file_nodes_by_source(file_path)
+                self._kb_delete(same_name["doc_id"])
+                if removed:
+                    logger.info(f"[LlamaIndex] 同名替换: 清理旧文件节点 {removed} 个")
+
             # 为每个文档节点添加元数据
             base_id = f"file_{abs(hash(file_path))}_{int(dt.now().timestamp())}"
             for i, doc in enumerate(documents):
@@ -473,6 +648,8 @@ class KnowledgeBaseTool(BaseTool):
             for doc in documents:
                 self._index.insert(doc)
             self._index.storage_context.persist(persist_dir=self._persist_dir)
+            self._kb_record(base_id, file_name, content_hash,
+                            chunk_count=len(documents), source="upload_file")
 
             logger.info(f"[LlamaIndex] 上传文件 '{file_name}' → {len(documents)} 个节点")
             return {
@@ -484,6 +661,94 @@ class KnowledgeBaseTool(BaseTool):
         except Exception as e:
             logger.error(f"[LlamaIndex] 上传文件失败: {e}")
             return self._ragflow_fallback_upload_file(file_path)
+
+    # ─────────────────────────────────────────────
+    # kb_documents 文档清单（去重 / 增量更新）
+    # ─────────────────────────────────────────────
+
+    @staticmethod
+    def _content_hash(text: str) -> str:
+        import hashlib
+        return hashlib.sha256((text or "").encode("utf-8")).hexdigest()
+
+    def _kb_db_path(self) -> str:
+        return os.environ.get(
+            "MAPASSIST_DB_PATH",
+            os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "sessions.db"),
+        )
+
+    def _kb_lookup(self, field: str, value: str) -> Optional[Dict[str, Any]]:
+        """按字段查 kb_documents 清单；表不存在时自动建表。"""
+        import sqlite3
+        try:
+            with sqlite3.connect(self._kb_db_path()) as conn:
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS kb_documents (
+                        doc_id TEXT PRIMARY KEY,
+                        name TEXT,
+                        content_hash TEXT,
+                        chunk_count INTEGER DEFAULT 0,
+                        source TEXT,
+                        created_at TEXT,
+                        updated_at TEXT
+                    )
+                """)
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_kb_documents_hash ON kb_documents(content_hash)")
+                conn.row_factory = sqlite3.Row
+                row = conn.execute(
+                    f"SELECT * FROM kb_documents WHERE {field}=? LIMIT 1", (value,)
+                ).fetchone()
+                conn.commit()
+                return dict(row) if row else None
+        except Exception as e:
+            logger.warning(f"[LlamaIndex] kb_documents 查询失败: {e}")
+            return None
+
+    def _kb_record(self, doc_id: str, name: str, content_hash: str,
+                   chunk_count: int, source: str) -> None:
+        import sqlite3
+        from datetime import datetime as _dt
+        now = _dt.now().strftime("%Y-%m-%d %H:%M:%S")
+        try:
+            with sqlite3.connect(self._kb_db_path()) as conn:
+                conn.execute(
+                    "INSERT INTO kb_documents (doc_id, name, content_hash, chunk_count, source, created_at, updated_at) "
+                    "VALUES (?,?,?,?,?,?,?) "
+                    "ON CONFLICT(doc_id) DO UPDATE SET name=excluded.name, content_hash=excluded.content_hash, "
+                    "chunk_count=excluded.chunk_count, source=excluded.source, updated_at=excluded.updated_at",
+                    (doc_id, name, content_hash, chunk_count, source, now, now),
+                )
+                conn.commit()
+        except Exception as e:
+            logger.warning(f"[LlamaIndex] kb_documents 写入失败: {e}")
+
+    def _kb_delete(self, doc_id: str) -> None:
+        import sqlite3
+        try:
+            with sqlite3.connect(self._kb_db_path()) as conn:
+                conn.execute("DELETE FROM kb_documents WHERE doc_id=?", (doc_id,))
+                conn.commit()
+        except Exception:
+            pass
+
+    def _delete_file_nodes_by_source(self, file_path: str) -> int:
+        """按 source_file 元数据删除文件对应的所有节点（同名替换语义）。"""
+        removed = 0
+        try:
+            docs = getattr(self._index.docstore, "docs", {}) or {}
+            stale = [
+                did for did, d in docs.items()
+                if (getattr(d, "metadata", {}) or {}).get("source_file") == file_path
+            ]
+            for did in stale:
+                try:
+                    self._index.delete_ref_doc(did, delete_from_docstore=True)
+                    removed += 1
+                except Exception:
+                    pass
+        except Exception as e:
+            logger.warning(f"[LlamaIndex] 按 source_file 清理旧节点失败: {e}")
+        return removed
 
     # ─────────────────────────────────────────────
     # RagFlow Fallback 降级方法

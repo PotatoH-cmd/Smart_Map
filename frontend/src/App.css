@@ -223,6 +223,11 @@ body {
   z-index: 1200;
 }
 
+/* GeoLibre 工作台打开时隐藏地图工具按钮（截图/清除） */
+.map-wrapper.geolibre-open .map-toolbar {
+  display: none;
+}
+
 .map-tool-button {
   background: rgba(255, 255, 255, 0.72);
   backdrop-filter: blur(16px);

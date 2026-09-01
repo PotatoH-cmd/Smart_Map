@@ -44,12 +44,17 @@ backend/static/reports/
 backend/static/screenshots/
 backend/static/uploads/
 backend/static/geojson/
+backend/static/arcgis_tile_cache/
+backend/static/cloud_native/
 backend/vector_tiles/
 backend/3dtiles_data/
 backend/llama_index_storage/
 backend/uploaded_tile_data/
 backend/output/
 backend/data/
+
+# 3D Tiles 转换输出（osgb→glb 产物，体积巨大）
+out/
 
 # 保留以上目录结构（clone 后可直接运行）
 !backend/drone_imagery/.gitkeep

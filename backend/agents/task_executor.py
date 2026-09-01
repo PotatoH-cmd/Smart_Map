@@ -76,6 +76,7 @@ class TaskExecutor:
         self.harness = AgentHarness(llm_cfg)       # 调度中枢
         self._tool_instances: Dict[str, QwenToolAdapter] = {}
         self._memory = MemorySaver()          # 进程内存储，内存操作 <1ms
+        self._memory_max_threads = 200        # MemorySaver 线程数上限（超出按最近活跃淘汰）
 
         # 构建 LangGraph 图
         self._graph = self._build_graph(llm_cfg)
@@ -90,6 +91,23 @@ class TaskExecutor:
         self.workspace = get_workspace_state()
         self.context_manager = ContextManager(workspace=self.workspace)
         self.run_engine = RunEngine(self, gateway=self.rules_gateway)
+        self._thread_last_seen: Dict[str, float] = {}   # thread_id -> 最近活跃时刻（MemorySaver 淘汰依据）
+
+    def _prune_checkpoints(self, thread_id: str) -> None:
+        """记录 thread 活跃并淘汰 MemorySaver 中最久未活跃的 thread，防止进程内存无限增长。"""
+        import time
+        self._thread_last_seen[thread_id] = time.monotonic()
+        storage = getattr(self._memory, "storage", None)
+        if storage is None:
+            return
+        # 仅统计仍存在于 storage 的 thread
+        self._thread_last_seen = {t: ts for t, ts in self._thread_last_seen.items() if t in storage}
+        overflow = len(self._thread_last_seen) - self._memory_max_threads
+        if overflow <= 0:
+            return
+        for t, _ in sorted(self._thread_last_seen.items(), key=lambda kv: kv[1])[:overflow]:
+            storage.pop(t, None)
+            self._thread_last_seen.pop(t, None)
 
     # ------------------------------------------------------------------
     # 工具实例管理（延迟初始化）
@@ -764,7 +782,15 @@ class TaskExecutor:
                     f"has {len(all_steps)} steps but no tool results. "
                     f"Possible cause: execution_plan steps have tool=None."
                 )
-                state["response"] = "地图操作指令已解析，正在执行中。"
+                # 用实际生成的地图命令构造回复，避免所有地图操作都返回同一句模板
+                # （前端按内容去重，固定模板会被当成重复消息丢弃，导致用户看不到任何回复）
+                if map_commands:
+                    loaded = "、".join(
+                        f"「{cmd.get('name') or cmd.get('type', '图层')}」" for cmd in map_commands
+                    )
+                    state["response"] = f"地图指令已执行，已加载图层 {loaded}。"
+                else:
+                    state["response"] = "地图操作指令已解析，正在执行中。"
             else:
                 state["response"] = "已接收到地图操作请求，但未生成执行步骤，请重新描述需求。"
             state["map_commands"] = map_commands
@@ -1379,6 +1405,7 @@ class TaskExecutor:
         }
 
     async def execute_stream(self, user_message: str, chat_history: Optional[List[Dict]] = None, thread_id: str = "default") -> AsyncGenerator[Dict[str, Any], None]:
+        self._prune_checkpoints(thread_id)
         state = self._create_initial_state(user_message, chat_history)
 
         try:
@@ -1713,6 +1740,7 @@ class TaskExecutor:
 
     async def execute(self, user_message: str, chat_history: Optional[List[Dict]] = None, thread_id: str = "default") -> Dict[str, Any]:
         """执行任务，返回与原版完全兼容的字典格式。"""
+        self._prune_checkpoints(thread_id)
         initial_state: AgentState = {
             "user_message": user_message,
             "chat_history": chat_history or [],

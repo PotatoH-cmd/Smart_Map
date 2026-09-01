@@ -535,6 +535,8 @@ function App() {
   const getMessageKey = useCallback((message) => {
     const chartKey = getChartMessageKey(message);
     if (chartKey) return `chart_${chartKey}`;
+    // 携带唯一 mid 的消息不参与内容去重（同一句回复在不同轮次合法重复）
+    if (message?.mid) return `${message.role || ''}_${message.mid}`;
     return `${message?.role || ''}_${message?.name || ''}_${message?.content || ''}`;
   }, [getChartMessageKey]);
 
@@ -909,7 +911,8 @@ function App() {
     const normalizedMessages = [...responseMessages];
 
     if (data.response && !normalizedMessages.some(m => m.role === 'assistant' && m.content === data.response)) {
-      normalizedMessages.push({ role: 'assistant', content: data.response });
+      // mid: 最终回复每轮唯一，防止被历史同文消息去重吞掉
+      normalizedMessages.push({ role: 'assistant', content: data.response, mid: `final-${Date.now()}` });
     }
 
     if (data.report_url) {
@@ -1675,7 +1678,7 @@ function App() {
             
             {messages.map((message, index) => renderMessage(message, index))}
             
-            {isBusy && (
+            {(isBusy || (streamProgress.length > 0 && !pendingInfo)) && (
               <div className="message assistant loading-message">
                 <div className="message-content">
                   <div className="message-role">豫水地图助手</div>
@@ -1688,7 +1691,7 @@ function App() {
                   ) : (
                     <ProgressTimeline
                       items={streamProgress}
-                      showSpinner={agentPhase !== 'reconnecting'}
+                      showSpinner={isBusy && agentPhase !== 'reconnecting'}
                       endRef={progressEndRef}
                     />
                   )}

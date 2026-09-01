@@ -11,13 +11,17 @@ run_store.py — Run 生命周期持久化层（阶段0：存储与契约）。
   兼容现有前端认识的事件类型，新增 verification / pending / cancelled。
 """
 import json
+import os
 import sqlite3
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
-# 与 main.DB_PATH 保持一致；可在进程启动时通过 RunStore(db_path=...) 覆盖
-DEFAULT_DB_PATH = "/home/server/python/map_assistant_v1/backend/sessions.db"
+# 与 main.DB_PATH 保持一致；优先环境变量 MAPASSIST_DB_PATH，默认项目 backend/sessions.db
+DEFAULT_DB_PATH = os.environ.get(
+    "MAPASSIST_DB_PATH",
+    os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "sessions.db"),
+)
 
 # 状态机（对齐文章 Run 生命周期）
 RUNNING = "running"
@@ -133,6 +137,27 @@ class RunStore:
     # ------------------------------------------------------------------
     # run 主记录
     # ------------------------------------------------------------------
+
+    # 终态（可清理）
+    TERMINAL_STATUSES = (COMPLETED, FAILED, CANCELLED)
+
+    def cleanup(self, keep_days: int = 7) -> int:
+        """清理超过 keep_days 的终态 run 及其事件/检查点；running/awaiting 不动。返回删除的 run 数。"""
+        cutoff = (datetime.now(timezone.utc).astimezone() - timedelta(days=keep_days)).isoformat(timespec="seconds")
+        with sqlite3.connect(self.db_path) as conn:
+            cur = conn.execute(
+                f"SELECT run_id FROM runs WHERE status IN (?,?,?) AND created_at < ?",
+                (*self.TERMINAL_STATUSES, cutoff),
+            )
+            ids = [r[0] for r in cur.fetchall()]
+            if not ids:
+                return 0
+            marks = ",".join("?" * len(ids))
+            conn.execute(f"DELETE FROM run_events WHERE run_id IN ({marks})", ids)
+            conn.execute(f"DELETE FROM run_checkpoints WHERE run_id IN ({marks})", ids)
+            conn.execute(f"DELETE FROM runs WHERE run_id IN ({marks})", ids)
+            conn.commit()
+        return len(ids)
 
     def create_run(self, run_id: str, session_id: str, user_message: str,
                    intent_json: Optional[str] = None) -> None:

@@ -422,6 +422,8 @@ class MapManager {
 
     // 添加交互工具
     this.addTaggingControl();
+    // GeoLibre 图层工作台入口（右上角切换按钮）
+    this.addGeoLibreControl();
 
     // 添加点击事件
     this.map.on('click', (e) => {
@@ -1135,6 +1137,106 @@ class MapManager {
     });
 
     new TaggingControl().addTo(this.map);
+  }
+
+  // GeoLibre 图层工作台：左上角切换按钮 + iframe 覆盖层（自部署 GeoLibre，端口 8090）
+  addGeoLibreControl() {
+    const GeoLibreControl = L.Control.extend({
+      options: { position: 'topleft' },
+      onAdd: () => {
+        const container = L.DomUtil.create('div', 'leaflet-bar leaflet-control');
+        const btn = L.DomUtil.create('a', '', container);
+        btn.innerHTML = '🌍';
+        btn.href = '#';
+        btn.title = 'GeoLibre 图层工作台';
+        btn.style.fontSize = '17px';
+        btn.style.display = 'flex';
+        btn.style.alignItems = 'center';
+        btn.style.justifyContent = 'center';
+        btn.style.width = '34px';
+        btn.style.height = '34px';
+        L.DomEvent.disableClickPropagation(container);
+        L.DomEvent.on(btn, 'click', (e) => {
+          L.DomEvent.stop(e);
+          this.toggleGeoLibre();
+        });
+        this._geolibreBtn = btn;
+        return container;
+      }
+    });
+    new GeoLibreControl().addTo(this.map);
+  }
+
+  getGeoLibreUrl() {
+    const host = (typeof window !== 'undefined' && window.location?.hostname) || '127.0.0.1';
+    // 通过 ?url= 深链接让 GeoLibre 加载后端动态生成的项目（含高分影像/河道红线/采区/3DTiles）
+    const projectUrl = `http://${host}:8006/api/geolibre/project`;
+    return `http://${host}:8090/?url=${encodeURIComponent(projectUrl)}`;
+  }
+
+  toggleGeoLibre() {
+    if (!this.map) return;
+    const container = this.map.getContainer();
+    let overlay = this._geolibreOverlay;
+    if (!overlay || !overlay.parentNode) {
+      overlay = document.createElement('div');
+      overlay.className = 'geolibre-overlay';
+      Object.assign(overlay.style, {
+        position: 'absolute',
+        inset: '0',
+        zIndex: '1100',
+        background: '#ffffff',
+        display: 'none',
+        flexDirection: 'column',
+      });
+      const bar = document.createElement('div');
+      Object.assign(bar.style, {
+        height: '40px',
+        flex: '0 0 40px',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'space-between',
+        padding: '0 12px',
+        background: '#1f2937',
+        color: '#ffffff',
+        fontSize: '13px',
+        fontFamily: 'inherit',
+        boxSizing: 'border-box',
+      });
+      const title = document.createElement('span');
+      title.textContent = 'GeoLibre 图层工作台（添加图层 → 选择数据源类型）';
+      const closeBtn = document.createElement('button');
+      closeBtn.type = 'button';
+      closeBtn.textContent = '✕ 关闭';
+      Object.assign(closeBtn.style, {
+        border: 'none',
+        background: 'rgba(255,255,255,0.15)',
+        color: '#ffffff',
+        padding: '4px 10px',
+        borderRadius: '4px',
+        cursor: 'pointer',
+        fontSize: '13px',
+      });
+      closeBtn.addEventListener('click', () => this.toggleGeoLibre());
+      bar.appendChild(title);
+      bar.appendChild(closeBtn);
+      const frame = document.createElement('iframe');
+      frame.src = this.getGeoLibreUrl();
+      frame.allow = 'geolocation; fullscreen';
+      Object.assign(frame.style, { border: '0', width: '100%', flex: '1 1 auto' });
+      overlay.appendChild(bar);
+      overlay.appendChild(frame);
+      container.appendChild(overlay);
+      this._geolibreOverlay = overlay;
+    }
+    const show = overlay.style.display === 'none';
+    overlay.style.display = show ? 'flex' : 'none';
+    // GeoLibre 打开时隐藏上层地图工具按钮（截图/清除），关闭时恢复
+    const wrapper = container.closest('.map-wrapper');
+    if (wrapper) wrapper.classList.toggle('geolibre-open', show);
+    if (this._geolibreBtn) {
+      this._geolibreBtn.style.backgroundColor = show ? '#e1f5fe' : 'white';
+    }
   }
 
   executeMapCommand(command) {
