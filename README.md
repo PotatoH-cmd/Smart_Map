@@ -25,19 +25,6 @@
 
 </div>
 
-**目录**
-
-1. [它能做什么？](#它能做什么)
-2. [核心亮点](#核心亮点)
-3. [系统架构](#系统架构)
-4. [记忆系统](#记忆系统)
-5. [三地图引擎](#三地图引擎)
-6. [智能体工作流与工具](#智能体工作流与工具)
-7. [项目结构](#项目结构)
-8. [快速开始](#快速开始)
-9. [FAQ](#faq)
-10. [API 一览](#api-一览)
-
 ---
 
 ## 🎬 它能做什么？
@@ -48,16 +35,16 @@
 
 系统自动完成意图识别、计划编排、工具调度与引擎联动：
 
-```text
-👤 你 ──▶ 🤖 Smart Map
-              ┌──────────────────────────┐
-              │  意图识别    ✅            │
-              │  执行计划    4 步          │
-              │  工具调度    map_tool      │
-              │  引擎联动    2D → GeoLibre │
-              │  结果合成    ✅            │
-              └──────────────────────────┘
-              ──▶ 影像上图 · 红线叠加 · 3D 贴地 · 文字回复
+```mermaid
+sequenceDiagram
+    actor U as 👤 用户
+    participant S as 🤖 Smart Map
+    participant E as 🗺️ 地图引擎
+    U->>S: 加载高分影像，叠加河道红线，切三维看实景
+    Note over S: 意图识别 ✅ · 计划编排 4 步 · 工具调度 map_tool
+    S->>E: 2D 图层加载 + GeoLibre 3D 贴地
+    E-->>U: 影像上图 · 红线叠加 · 3D 贴地
+    S-->>U: "已加载 2023 年高分影像与河道红线，实景三维已就绪。"
 ```
 
 更多典型场景：
@@ -151,9 +138,18 @@ graph TB
 
 **长期记忆（知识库）** — 双路召回 + 融合 + 精排：
 
-```text
-查询 ──▶ ① 向量召回 (Milvus, top12) ──┐
-       ② BM25 召回 (jieba, top12) ──┼──▶ RRF 融合 (k=60) ──▶ gte-rerank-v2 ──▶ top_k
+```mermaid
+flowchart LR
+    Q["查询"] --> V["① 向量召回<br/>Milvus · top12"]
+    Q --> B["② BM25 召回<br/>jieba · top12"]
+    V --> F["RRF 融合<br/>k=60"]
+    B --> F
+    F --> R["gte-rerank-v2 精排"]
+    R --> K["top_k"]
+
+    style Q fill:#eff6ff,stroke:#2563eb
+    style F fill:#fffbeb,stroke:#d97706
+    style R fill:#fdf2f8,stroke:#db2777
 ```
 
 - 向量后端默认 Milvus，不可用自动回退 SimpleVectorStore；
@@ -355,13 +351,11 @@ GeoLibre 需独立部署（nginx 托管，默认 :8090），后端通过 `/api/g
 
 **生产可靠性**
 
-```text
-每日自动备份    sessions.db + 向量库 + 知识图谱（轮转保留）
-三级灾备恢复    本地备份 → RagFlow 重建 → 空库可用
-内存治理        MemorySaver LRU 淘汰 · 零泄漏
-数据治理        Run 7天TTL · 失败轮次落库 · WAL 模式
-全链路降级      Milvus→Simple · BM25→纯向量 · LlamaIndex→RagFlow
-```
+- 每日自动备份 — sessions.db + 向量库 + 知识图谱（轮转保留）
+- 三级灾备恢复 — 本地备份 → RagFlow 重建 → 空库可用
+- 内存治理 — MemorySaver LRU 淘汰，零泄漏
+- 数据治理 — Run 7 天 TTL · 失败轮次落库 · WAL 模式
+- 全链路降级 — Milvus→Simple · BM25→纯向量 · LlamaIndex→RagFlow
 
 **Roadmap**
 
