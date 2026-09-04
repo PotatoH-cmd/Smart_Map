@@ -70,6 +70,7 @@ INTENT_DESCRIPTIONS = {
     IntentType.MAP_DISPLAY: "地图展示类任务：加载矢量数据、切换底图、添加标记等",
     IntentType.DATA_QUERY: "数据查询类任务：数据库查询、统计分析、数据对比",
     IntentType.KNOWLEDGE_SEARCH: "知识检索类任务：政策查询、流程咨询、文档查找",
+    IntentType.WEATHER_QUERY: "天气查询任务：查询城市天气实况、预报、空气质量",
     IntentType.DATA_VISUALIZATION: "数据可视化任务：生成图表、统计可视化",
     IntentType.REPORT_GENERATION: "报告生成任务：生成正式报告、导出文档",
     IntentType.LOCATION_SEARCH: "位置搜索任务：查找地点坐标、地址搜索",
@@ -93,6 +94,7 @@ TOOL_INTENT_MAPPING = {
     "report_generator_tool": [IntentType.REPORT_GENERATION],
     "caisha_report_tool": [IntentType.REPORT_GENERATION],  # 采砂监测报告（一步完成）
     "weather_tool": [IntentType.WEATHER_QUERY],
+    "web_search_tool": [IntentType.KNOWLEDGE_SEARCH, IntentType.UNKNOWN, IntentType.CROSS_INTENT],  # 联网搜索（实时信息）
     "spatial_processing_tool": [IntentType.SPATIAL_PROCESSING],
     "spatial_reference_tool": [IntentType.SPATIAL_REFERENCE, IntentType.DATA_QUERY, IntentType.MAP_DISPLAY, IntentType.CROSS_INTENT],
     "qgis_mcp_tool": [IntentType.SPATIAL_ANALYSIS, IntentType.SPATIAL_PROCESSING, IntentType.SPATIAL_REFERENCE],

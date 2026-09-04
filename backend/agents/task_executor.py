@@ -762,6 +762,45 @@ class TaskExecutor:
                 else:
                     summary = f"[{tool_name}]: 检索完成，但未找到相关内容"
                 tool_summaries.append(summary)
+            elif tool_name == "weather_tool" and result.get("success"):
+                # 天气查询：qweather 走 current/forecasts/aqi；web-search 降级走 answer+来源
+                w_parts = [f"城市：{result.get('city', '未知')}"]
+                answer = str(result.get("answer") or "").strip()
+                if answer:
+                    w_parts.append(f"天气实况（联网搜索）：{answer[:1200]}")
+                    for i, sr in enumerate((result.get("search_results") or [])[:5]):
+                        w_parts.append(f"  [{i+1}] {sr.get('title') or sr.get('url', '')}")
+                else:
+                    current = result.get("current") or {}
+                    if current:
+                        w_parts.append(
+                            f"当前天气：{current.get('weather', '未知')}，气温 {current.get('temp', '?')}℃"
+                            f"（体感 {current.get('feels_like', '?')}℃），湿度 {current.get('humidity', '?')}%，"
+                            f"{current.get('wind_direction', '')}风 {current.get('wind_scale', '')} 级"
+                        )
+                    forecasts = result.get("forecasts") or []
+                    if forecasts:
+                        w_parts.append("未来预报：")
+                        for d in forecasts[:7]:
+                            w_parts.append(
+                                f"  {d.get('date', '')}: {d.get('text_day', '')}转{d.get('text_night', '')}，"
+                                f"{d.get('temp_min', '?')}~{d.get('temp_max', '?')}℃，降水 {d.get('precip', '?')}mm"
+                            )
+                    aqi = result.get("aqi")
+                    if isinstance(aqi, dict) and aqi:
+                        w_parts.append(f"空气质量：AQI {aqi.get('aqi', '?')}（{aqi.get('category', '?')}），PM2.5 {aqi.get('pm2p5', '?')}")
+                    if result.get("source") == "mock":
+                        w_parts.append("（注意：以上为模拟数据，真实天气服务不可用）")
+                tool_summaries.append(f"[{tool_name}]:\n" + "\n".join(w_parts))
+            elif tool_name == "web_search_tool" and result.get("success"):
+                # 联网搜索：answer 已含引用标记的总结，附上来源列表供标注出处
+                ws_parts = [f"搜索问题：{result.get('query', '')}"]
+                answer = str(result.get("answer") or "").strip()
+                if answer:
+                    ws_parts.append(f"搜索总结：{answer[:1500]}")
+                for i, sr in enumerate((result.get("search_results") or [])[:5]):
+                    ws_parts.append(f"  [{i+1}] {sr.get('title', '')} ({sr.get('url', '')})")
+                tool_summaries.append(f"[{tool_name}]:\n" + "\n".join(ws_parts))
             elif content or (isinstance(data, list) and data):
                 summary = f"[{tool_name}]: {str(content)[:500]}"
                 # 对数据库查询，把 data 的 JSON 摘要也加进来
@@ -893,6 +932,8 @@ class TaskExecutor:
 
         # 来源标注：回答引用了知识库时，确保末尾带有来源文档名（LLM 忘标则兜底追加）
         response_text = self._append_kb_sources(response_text, tool_results)
+        # 联网搜索来源标注兜底
+        response_text = self._append_web_sources(response_text, tool_results)
 
         state["response"] = response_text
         logger.info(
@@ -935,6 +976,50 @@ class TaskExecutor:
         if len(titles) > 3:
             shown += f" 等 {len(titles)} 篇文档"
         return f"{response_text}\n\n📎 来源：{shown}"
+
+    def _append_web_sources(self, response_text: str, tool_results: List[Dict]) -> str:
+        """联网搜索回答的来源标注兜底：提取搜索结果标题+域名，去重后追加到回复末尾。
+
+        LLM 已在正文中标注任一来源标题/域名则不重复追加；最多列 3 条。
+        """
+        sources: List[str] = []
+        for item in tool_results:
+            is_web = item.get("tool_name") == "web_search_tool" or (
+                item.get("tool_name") == "weather_tool"
+                and isinstance(item.get("result"), dict)
+                and item["result"].get("provider") == "web-search"
+            )
+            if not is_web:
+                continue
+            result = item.get("result", {})
+            if not isinstance(result, dict) or not result.get("success"):
+                continue
+            for sr in result.get("search_results") or []:
+                if not isinstance(sr, dict):
+                    continue
+                title = str(sr.get("title") or "").strip()
+                url = str(sr.get("url") or "").strip()
+                if not title and not url:
+                    continue
+                domain = url.split("//", 1)[-1].split("/", 1)[0] if url else ""
+                if title and domain:
+                    label = f"{title}（{domain}）"
+                else:
+                    label = title or domain
+                if label and label not in sources:
+                    sources.append(label)
+        if not sources:
+            return response_text
+        # 正文已标注任一来源（标题或域名出现）则不重复追加
+        plain = [s.split("（")[0] for s in sources] + [
+            s.split("（")[1].rstrip("）") for s in sources if "（" in s
+        ]
+        if any(p in response_text for p in plain if p):
+            return response_text
+        shown = "；".join(sources[:3])
+        if len(sources) > 3:
+            shown += f" 等 {len(sources)} 条来源"
+        return f"{response_text}\n\n📎 网络来源：{shown}"
 
     def _try_extract_rich_response(self, tool_results: List[Dict]) -> Optional[str]:
         """如果工具已产出高质量摘要，返回可直接用作 response 的文本，否则返回 None。"""
@@ -1186,6 +1271,7 @@ class TaskExecutor:
             "coordinate_marker": "坐标标注工具",
             "cesium_tool": "三维地图工具",
             "weather_tool": "天气查询工具",
+            "web_search_tool": "联网搜索",
             "spatial_reference_tool": "空间参考数据工具",
         }
         return tool_names.get(tool_name, tool_name)
@@ -1362,6 +1448,22 @@ class TaskExecutor:
 
         return f"{readable_tool_name}已完成。"
 
+    # 天气关键词停用词：从用户消息中剥离后剩余部分视为城市名
+    _WEATHER_CITY_STRIP_RE = re.compile(
+        r"查询|查一下|查下|看看|帮我|麻烦|请问|今天|明天|后天|现在|当前|这几天|未来三天|未来七天"
+        r"|的|天气|气温|温度|降雨|下雨|下雪|风力|风速|湿度|空气质量|AQI|雾霾"
+        r"|怎么样|如何|预报|几度|带伞|紫外线|情况|冷吗|热吗|有雨吗"
+    )
+
+    @classmethod
+    def _extract_city_from_message(cls, user_message: str) -> str:
+        """从用户消息中兜底抽取城市名：剥离天气相关词后剩余中文片段。"""
+        if not user_message:
+            return ""
+        candidate = cls._WEATHER_CITY_STRIP_RE.sub("", user_message)
+        candidate = re.sub(r"[？?！!。，,．\s_\-—~]|吗$|呢$", "", candidate)
+        return candidate.strip()
+
     def _normalize_tool_params(self, tool_name: str, params: Dict[str, Any], user_message: str, step: Any) -> Dict[str, Any]:
         """根据工具类型规范化参数，确保必需参数存在且格式正确。"""
         if not isinstance(params, dict):
@@ -1389,6 +1491,15 @@ class TaskExecutor:
         if tool_name == "data_visualizer_tool":
             if "demand" not in normalized or not normalized["demand"]:
                 normalized["demand"] = user_message
+            return normalized
+
+        # weather_tool：city 缺失时从用户消息兜底抽取（LLM 漏填 params 时避免反问死循环）
+        if tool_name == "weather_tool":
+            if not normalized.get("city"):
+                extracted = self._extract_city_from_message(user_message)
+                if extracted:
+                    normalized["city"] = extracted
+                    logger.info(f"[tool_node] weather_tool city fallback: '{extracted}'")
             return normalized
 
         # report_generator_tool：确保 variables 是字典

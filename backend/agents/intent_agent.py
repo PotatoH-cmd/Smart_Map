@@ -21,6 +21,8 @@ TOOL_KEYWORD_ROUTES: List[Tuple[str, Tuple[str, ...]]] = [
     ("qgis_mcp_tool", ("缓冲区", "buffer", "裁剪", "clip", "叠加", "相交", "面积", "中心点", "centroid", "分区统计", "空间关联")),
     ("spatial_processing_tool", ("坐标转换", "投影", "带号", "CGCS2000", "EPSG", "矢量范围", "XY相反", "生成矢量")),
     ("spatial_reference_tool", ("红线", "河道", "可采区", "采区", "许可范围")),
+    ("weather_tool", ("天气", "气温", "温度", "降雨", "下雨", "下雪", "风力", "风速", "湿度", "空气质量", "AQI", "雾霾", "预报", "带伞", "紫外线")),
+    ("web_search_tool", ("新闻", "热点", "实时", "最新", "今天", "现在", "目前", "行情")),
     ("data_visualizer_tool", ("图表", "统计图", "可视化", "柱状图", "趋势", "占比", "分布图", "饼图")),
     ("postgresql_tool", ("查询", "统计", "多少个", "多少", "平均", "超深", "高程", "数量", "count")),
     ("report_generator_tool", ("报告", "出具", "文档")),

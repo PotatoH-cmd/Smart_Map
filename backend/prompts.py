@@ -53,6 +53,12 @@ TOOL_ROUTING_RULES = """
 **知识检索类（knowledge_search）**
 - 政策/流程/操作文档问题：必须先调用 `knowledge_base_tool(operation='search')`
 - 禁止查询数据库回答此类问题
+- 知识库查不到的时效性/常识/新闻类问题：调用 `web_search_tool` 联网搜索
+
+**联网搜索类（knowledge_search / unknown 兜底）**
+- 用户询问实时信息（新闻、热点、"今天/最新/现在"、价格行情）或知识库、数据库都不适用的常识问题时，
+  必须调用 `web_search_tool`，params：{"query": "完整的搜索问题"}
+- 回答时在末尾标注网络来源（标题/域名）
 
 **数据可视化类（data_visualization）**
 - 必须调用 `data_visualizer_tool`
@@ -63,7 +69,9 @@ TOOL_ROUTING_RULES = """
 - 若会话中包含系统提示\"[地图截图已保存]\"，必须将其中的服务器路径作为 `map_image_path` 传入 `report_generator_tool`
 
 **天气查询类（weather_query）**
-- 必须调用 `weather_tool`，城市名建议精确到区县级别
+- 必须调用 `weather_tool`，params：{"city": "<用户提到的城市名>"}，可选 forecast_days（1/3/7）、include_aqi
+- 用户已提到城市（哪怕只说城市名如"郑州"）时**必须直接调用工具**，严禁反问用户要城市名
+- 工具会自动解析区县，无需用户补充更精确的地名
 
 **空间参考查询类（spatial_reference）**
 - 当用户提到"红线""河道红线""采区""可采区""边界范围"时，必须调用 `spatial_reference_tool(action='get_geometry')`
@@ -330,6 +338,18 @@ TOOL_CONSTRAINT_SNIPPETS: Dict[str, str] = {
         "- 检索：{\"operation\": \"search\", \"query\": \"用户问题核心关键词\"}\n"
         "- 政策/流程/操作文档类问题必须走知识库检索，禁止查询数据库"
     ),
+    "weather_tool": (
+        "weather_tool 参数格式：\n"
+        "- {\"city\": \"<用户提到的城市名>\", \"forecast_days\": 1|3|7, \"include_aqi\": true|false}\n"
+        "- city 直接取用户提到的城市（如\"郑州\"\"信阳市淮滨县\"），工具会自动解析区县；\n"
+        "- 用户已提到城市时必须直接调用，严禁反问用户要城市名"
+    ),
+    "web_search_tool": (
+        "web_search_tool（联网搜索）参数格式：\n"
+        "- {\"query\": \"完整的搜索问题\"}，query 用完整中文句子，如 {\"query\": \"郑州市今天天气\"}\n"
+        "- 适用于实时信息（新闻/热点/行情）、知识库与数据库覆盖不到的常识问题；\n"
+        "- 回答需在末尾标注网络来源（标题/域名）"
+    ),
 }
 
 # ============================================================
@@ -377,7 +397,8 @@ INTENT_EXECUTOR_PROMPTS = {
         "本轮会话为天气查询任务。"
         "必须使用 weather_tool 查询天气；"
         "支持查询当前天气和未来预报；"
-        "城市名称建议精确到区县级别。"
+        "params 示例：{\"city\": \"郑州\"}——直接使用用户提到的城市名调用，"
+        "禁止以任何理由反问用户城市名；工具会自动解析区县。"
     ),
     "location_search": (
         "本轮会话为位置搜索任务。"

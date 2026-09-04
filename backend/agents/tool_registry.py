@@ -29,6 +29,7 @@ class ToolRegistry:
         self.register("report_generator_tool", self._create_report_generator_tool)
         self.register("caisha_report_tool", self._create_caisha_report_tool)
         self.register("weather_tool", self._create_weather_tool)
+        self.register("web_search_tool", self._create_web_search_tool)
         self.register("spatial_processing_tool", self._create_spatial_processing_tool)
         self.register("spatial_reference_tool", self._create_spatial_reference_tool)
         self.register("tile_publish_tool", self._create_tile_publish_tool)
@@ -125,6 +126,11 @@ class ToolRegistry:
     def _create_weather_tool():
         from tools.weather_tool import WeatherTool
         return WeatherTool()
+
+    @staticmethod
+    def _create_web_search_tool():
+        from tools.web_search_tool import WebSearchTool
+        return WebSearchTool()
 
     @staticmethod
     def _create_spatial_processing_tool():

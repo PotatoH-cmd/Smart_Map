@@ -99,6 +99,7 @@ from tools.knowledge_graph_tool import get_kg  # 知识图谱工具
 from tools.data_visualizer_tool import DataVisualizerTool
 from tools.report_generator_tool import ReportGeneratorTool
 from tools.weather_tool import WeatherTool
+from tools.web_search_tool import WebSearchTool  # noqa: F401 — import 触发 qwen_agent 注册
 from tools.cesium_tool import CesiumTool  # Cesium 3D 地图工具
 from tools.gis_tool_router import router as gis_tool_router  # GIS 处理工具
 from tools.spatial_reference_tool import SpatialReferenceTool  # 空间参考工具（红线/采区），触发注册
@@ -544,6 +545,7 @@ def init_agent():
         'data_visualizer_tool',
         'report_generator_tool',
         'weather_tool',
+        'web_search_tool',  # 联网搜索（实时信息兜底）
         'cesium_tool',  # Cesium 3D 地图工具
         'spatial_reference_tool',  # 空间参考数据工具（红线/采区边界等）
     ]

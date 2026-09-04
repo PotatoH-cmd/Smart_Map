@@ -58,10 +58,19 @@ class WeatherTool(BaseTool):
         api_key = os.environ.get("WEATHER_API_KEY", "bb183d8bf04a4870be4efe78e7e6337b")
 
         try:
-            return self._call_qweather(city, forecast_days, include_aqi, api_key)
+            result = self._call_qweather(city, forecast_days, include_aqi, api_key)
+            if result.get("success"):
+                return result
+            logger.warning(f"QWeather unavailable for '{city}', falling back to web search")
         except Exception as e:
-            logger.warning(f"Weather query failed, using mock data. reason={e}")
+            logger.warning(f"Weather query failed: {e}")
+
+        # 显式配置 WEATHER_MOCK=1 时才使用随机模拟数据（默认关闭，避免误导）
+        if os.environ.get("WEATHER_MOCK", "0") == "1":
             return self._mock_weather(city, forecast_days, include_aqi)
+
+        # 降级链：和风天气不可用 → 百炼联网搜索查实时天气（带真实来源）
+        return self._fallback_web_search(city, forecast_days)
 
     # =============== QWeather v7 实现 ===============
     def _call_qweather(self, city: str, forecast_days: int, include_aqi: bool, api_key: str) -> Dict[str, Any]:
@@ -75,7 +84,7 @@ class WeatherTool(BaseTool):
 
         if forecast_days <= 1:
             if not now_data:
-                return self._mock_weather(city, forecast_days, include_aqi)
+                return self._weather_unavailable(city)
             return {
                 "success": True,
                 "provider": "qweather",
@@ -88,7 +97,7 @@ class WeatherTool(BaseTool):
         else:
             daily = self._qweather_daily(location, api_key, forecast_days)
             if not daily:
-                return self._mock_weather(city, forecast_days, include_aqi)
+                return self._weather_unavailable(city)
             return {
                 "success": True,
                 "provider": "qweather",
@@ -230,7 +239,39 @@ class WeatherTool(BaseTool):
             logger.warning(f"Air now failed: {e}")
         return None
 
-    # =============== Fallback: 模拟数据 ===============
+    # =============== 联网搜索降级 ===============
+    def _fallback_web_search(self, city: str, forecast_days: int) -> Dict[str, Any]:
+        """和风天气不可用时，通过百炼联网搜索查询实时天气（带真实来源）。"""
+        try:
+            from tools.web_search_tool import WebSearchTool
+            question = f"{city}今天天气" if forecast_days <= 1 else f"{city}未来{forecast_days}天天气预报"
+            r = WebSearchTool().call({"query": question})
+            if r.get("success"):
+                return {
+                    "success": True,
+                    "provider": "web-search",
+                    "city": city,
+                    "source": "web_search",
+                    "answer": r.get("answer", ""),
+                    "search_results": r.get("search_results", []),
+                    "total_results": r.get("total_results", 0),
+                }
+            return {"success": False, "error": r.get("error", "联网搜索不可用"), "provider": "web-search"}
+        except Exception as e:
+            logger.warning(f"Weather web-search fallback failed: {e}")
+            return {"success": False, "error": f"天气服务与联网搜索均不可用：{e}", "provider": "qweather"}
+
+    # =============== 服务不可用兜底 ===============
+    def _weather_unavailable(self, city: str) -> Dict[str, Any]:
+        """真实天气服务不可用时返回明确失败，不编造数据。"""
+        return {
+            "success": False,
+            "provider": "qweather",
+            "city": city,
+            "error": "天气服务暂时不可用，请稍后重试或通过联网搜索查询",
+        }
+
+    # =============== Fallback: 模拟数据（仅 WEATHER_MOCK=1 时启用） ===============
     def _mock_weather(self, city: str, forecast_days: int, include_aqi: bool) -> Dict[str, Any]:
         import random
         from datetime import datetime, timedelta
