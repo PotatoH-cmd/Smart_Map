@@ -181,6 +181,13 @@ if not os.path.exists(DB_PATH) and os.path.exists(_LEGACY_DB_PATH):
     except Exception as e:  # noqa: BLE001
         print(f"[init_db] 旧 sessions.db 迁移失败（继续用新路径）: {e}")
 
+# Falcon 目标识别：检测脚本 + 常驻推理服务
+# 脚本（falcon_detect.py）负责影像获取/瓦片/融合/GeoJSON，模型推理走常驻服务
+# falcon_service.py（FALCON_SERVICE_URL），避免每请求冷加载模型。
+_FALCON_SCRIPT_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tools", "falcon_detect.py")
+_FALCON_PYTHON_BIN = os.environ.get("FALCON_PYTHON_BIN", "/home/szgczx/miniconda3/envs/mapagent6/bin/python")
+FALCON_SERVICE_URL = os.environ.get("FALCON_SERVICE_URL", "http://127.0.0.1:8765").rstrip("/")
+
 # PostgreSQL 连接配置（环境变量注入，见 .env GEOSERVER_PG_*）
 _PG_CONN = {
     "host": os.environ.get("GEOSERVER_PG_HOST", "172.136.16.52"),
@@ -4206,9 +4213,9 @@ async def get_mvt_tile(
 
 
 # ==============================
-# SAM 目标识别接口
+# Falcon 目标识别接口
 # ==============================
-class SAMDetectRequest(BaseModel):
+class FalconDetectRequest(BaseModel):
     geometry: dict  # GeoJSON Polygon geometry
     prompt: str
     mode: str = "rectangle"  # rectangle | polygon
@@ -4217,10 +4224,10 @@ class SAMDetectRequest(BaseModel):
     precise_mode: bool = False  # 精度模式：默认关闭（快速优先）
 
 
-@app.post("/api/sam-detect")
-async def sam_detect(req: SAMDetectRequest):
+@app.post("/api/falcon-detect")
+async def falcon_detect(req: FalconDetectRequest):
     """
-    SAM 目标识别：根据绘制的 GeoJSON 区域和文本提示词，执行 SAM 推理
+    Falcon 目标识别：根据绘制的 GeoJSON 区域和自然语言提示词，执行 Falcon-Perception 推理
     通过 SSE 实时推送进度，最终返回 GeoJSON 结果
     """
     import subprocess
@@ -4231,7 +4238,21 @@ async def sam_detect(req: SAMDetectRequest):
     import queue
     import threading
 
-    logger.info(f"SAM detect request: prompt={req.prompt}, mode={req.mode}, precise_mode={req.precise_mode}")
+    logger.info(f"Falcon detect request: prompt={req.prompt}, mode={req.mode}, precise_mode={req.precise_mode}")
+
+    # 预检：Falcon 推理服务是否就绪（不可达立即报错，不启动任务）
+    try:
+        import requests as _requests
+        _health = _requests.get(f"{FALCON_SERVICE_URL}/health", timeout=5).json()
+        if _health.get("status") == "error":
+            raise HTTPException(status_code=503,
+                                detail=f"Falcon 推理服务异常: {_health.get('error')}")
+    except HTTPException:
+        raise
+    except Exception:
+        raise HTTPException(
+            status_code=503,
+            detail=f"Falcon 推理服务不可达 ({FALCON_SERVICE_URL})，请先启动 falcon-service（pm2 start falcon-service）")
 
     # 预检：坐标是否在影像覆盖范围内
     coords = req.geometry.get("coordinates", [])
@@ -4254,7 +4275,7 @@ async def sam_detect(req: SAMDetectRequest):
                 )
 
     task_id = uuid.uuid4().hex[:12]
-    progress_dir = "/tmp/sam_progress"
+    progress_dir = "/tmp/falcon_progress"
     os.makedirs(progress_dir, exist_ok=True)
     progress_file = os.path.join(progress_dir, f"{task_id}.json")
 
@@ -4262,17 +4283,17 @@ async def sam_detect(req: SAMDetectRequest):
     with open(progress_file, 'w') as f:
         json.dump({"stage": "init", "current": 0, "total": 1, "message": "任务已创建，正在启动..."}, f)
 
-    output_dir = tempfile.mkdtemp(prefix="sam_detect_")
-    sam_script = "/home/server/python/map_assistant_v1/backend/tools/sam_predict.py"
-    python_bin = "/home/server/miniconda3/envs/sam/bin/python"
+    output_dir = tempfile.mkdtemp(prefix="falcon_detect_")
+    falcon_script = _FALCON_SCRIPT_PATH
+    python_bin = _FALCON_PYTHON_BIN
     geometry_json = json.dumps(req.geometry)
-    cmd = [python_bin, "-u", sam_script, geometry_json, req.prompt]
+    cmd = [python_bin, "-u", falcon_script, geometry_json, req.prompt]
     if not req.precise_mode:
         cmd.append("--demo")
     if req.quick_mode:
         cmd.append("--quick")
 
-    logger.info(f"SAM command (streaming): {' '.join(cmd)}")
+    logger.info(f"Falcon command (streaming): {' '.join(cmd)}")
 
     # ── SSE 流式生成器 ──
     def _run_and_stream(q: queue.Queue):
@@ -4284,7 +4305,8 @@ async def sam_detect(req: SAMDetectRequest):
                 text=True,
                 env={**os.environ,
                      "CUDA_VISIBLE_DEVICES": os.environ.get("CUDA_VISIBLE_DEVICES", "0"),
-                     "SAM_PROGRESS_FILE": progress_file,
+                     "FALCON_PROGRESS_FILE": progress_file,
+                     "FALCON_SERVICE_URL": FALCON_SERVICE_URL,
                      }
             )
 
@@ -4329,7 +4351,7 @@ async def sam_detect(req: SAMDetectRequest):
                         }, ensure_ascii=False))
                     except Exception:
                         pass
-                elif line.startswith("[SAM]"):
+                elif line.startswith("[FALCON]"):
                     # 日志行也推送为进度消息
                     q.put(json.dumps({
                         "type": "progress", "stage": "log",
@@ -4369,12 +4391,12 @@ async def sam_detect(req: SAMDetectRequest):
                     }, ensure_ascii=False))
                 else:
                     q.put(json.dumps({
-                        "type": "error", "message": "SAM 输出解析失败",
+                        "type": "error", "message": "Falcon 输出解析失败",
                     }, ensure_ascii=False))
                 return
 
             result_data["_task_id"] = task_id
-            logger.info(f"SAM result: {len(result_data.get('features', []))} features")
+            logger.info(f"Falcon result: {len(result_data.get('features', []))} features")
             q.put(json.dumps({
                 "type": "final", "result": result_data,
             }, ensure_ascii=False))
@@ -4409,25 +4431,20 @@ async def sam_detect(req: SAMDetectRequest):
 
 
 # ==============================
-# SAM 变化检测接口 — 已移除（统一为 SAM 语义分割路径）
-# 原 /api/sam-change-detect 端点已删除，变化检测功能不再支持
+# 变化检测接口 — 已移除（统一为 Falcon 语义分割路径）
 # ==============================
 
 
 # ==============================
-# SAM 阈值配置接口 — 已移除（VLM 相关功能已删除）
-# 统一使用 SAM3 语义分割，不再需要 VLM 阈值调节
-# ==============================
-# 瓦片级 VLM 检测（Gemma4 六步流程）— 已移除
-# 原 /api/sam-tile-detect 端点及相关函数已删除
-# 检测路径统一为 SAM3 语义分割
+# 阈值配置接口 — 已移除（VLM 相关功能已删除）
+# 检测路径统一为 Falcon-Perception 自由文本 query
 # ==============================
 
 
-@app.get("/api/sam-progress/{task_id}")
-async def sam_progress(task_id: str):
-    """查询 SAM 推理实时进度"""
-    progress_file = f"/tmp/sam_progress/{task_id}.json"
+@app.get("/api/falcon-progress/{task_id}")
+async def falcon_progress(task_id: str):
+    """查询 Falcon 推理实时进度"""
+    progress_file = f"/tmp/falcon_progress/{task_id}.json"
     if not os.path.exists(progress_file):
         raise HTTPException(status_code=404, detail="任务不存在或已过期")
     try:
@@ -4437,10 +4454,10 @@ async def sam_progress(task_id: str):
         return {"stage": "error", "current": 0, "total": 1, "message": str(e)}
 
 
-@app.get("/api/sam-test-result")
-async def sam_test_result():
-    """返回预计算的 SAM 测试结果（南阳市区建筑检测，365个图斑）"""
-    test_file = "/tmp/sam_building_result.json"
+@app.get("/api/falcon-test-result")
+async def falcon_test_result():
+    """返回预计算的 Falcon 测试结果（南阳市区建筑检测，365个图斑）"""
+    test_file = "/tmp/falcon_building_result.json"
     if os.path.exists(test_file):
         with open(test_file) as f:
             data = json.load(f)
@@ -4449,14 +4466,14 @@ async def sam_test_result():
     return {"type": "FeatureCollection", "features": [], "_note": "测试数据尚未生成"}
 
 
-class SAMDownloadRequest(BaseModel):
+class FalconDownloadRequest(BaseModel):
     geojson: dict
 
 
-@app.post("/api/sam-download")
-async def sam_download(req: SAMDownloadRequest):
+@app.post("/api/falcon-download")
+async def falcon_download(req: FalconDownloadRequest):
     """
-    将 SAM 识别结果 GeoJSON 打包为 SHP + ZIP 下载
+    将 Falcon 识别结果 GeoJSON 打包为 SHP + ZIP 下载
     """
     import zipfile
     import tempfile
@@ -4473,12 +4490,12 @@ async def sam_download(req: SAMDownloadRequest):
         gdf = gpd.GeoDataFrame.from_features(geojson["features"], crs="EPSG:4326")
 
         # 写入临时目录
-        tmp_dir = tempfile.mkdtemp(prefix="sam_shp_")
-        shp_path = os.path.join(tmp_dir, "sam_result.shp")
+        tmp_dir = tempfile.mkdtemp(prefix="falcon_shp_")
+        shp_path = os.path.join(tmp_dir, "falcon_result.shp")
         gdf.to_file(shp_path)
 
         # 打包 ZIP
-        zip_path = os.path.join(tmp_dir, "sam_result.zip")
+        zip_path = os.path.join(tmp_dir, "falcon_result.zip")
         with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zf:
             for ext in ['.shp', '.shx', '.dbf', '.prj', '.cpg']:
                 fpath = shp_path.replace('.shp', ext)
@@ -4495,7 +4512,7 @@ async def sam_download(req: SAMDownloadRequest):
         return Response(
             content=content,
             media_type="application/zip",
-            headers={"Content-Disposition": 'attachment; filename="sam_result.zip"'}
+            headers={"Content-Disposition": 'attachment; filename="falcon_result.zip"'}
         )
     except Exception as e:
         logger.exception(f"SHP download error: {e}")
@@ -4503,20 +4520,20 @@ async def sam_download(req: SAMDownloadRequest):
 
 
 # ==============================
-# SAM Requery 精修 API
+# Falcon Requery 精修 API
 # ==============================
 
-class SAMRequeryRequest(BaseModel):
+class FalconRequeryRequest(BaseModel):
     geometry: dict           # GeoJSON Polygon — 原始裁剪区域
     prompt: str              # 文本提示词
-    coarse_geojson: dict     # 粗检测 GeoJSON FeatureCollection（/api/sam-detect 的输出）
+    coarse_geojson: dict     # 粗检测 GeoJSON FeatureCollection（/api/falcon-detect 的输出）
 
 
-@app.post("/api/sam-requery")
-async def sam_requery(req: SAMRequeryRequest):
+@app.post("/api/falcon-requery")
+async def falcon_requery(req: FalconRequeryRequest):
     """
     Requery 精修：对粗检测结果中的每个图斑，裁剪对应影像区域 →
-    SAM3 再推理 → 返回精修 GeoJSON。
+    Falcon 再推理 → 返回精修 GeoJSON。
 
     输入：
       - geometry: 原始绘制区域（用于从 TIF 裁剪影像）
@@ -4530,21 +4547,21 @@ async def sam_requery(req: SAMRequeryRequest):
     import shutil
     import uuid
 
-    logger.info(f"SAM Requery: prompt={req.prompt[:30]}, coarse_features={len(req.coarse_geojson.get('features', []))}")
+    logger.info(f"Falcon Requery: prompt={req.prompt[:30]}, coarse_features={len(req.coarse_geojson.get('features', []))}")
 
     task_id = uuid.uuid4().hex[:12]
-    output_dir = tempfile.mkdtemp(prefix="sam_requery_")
+    output_dir = tempfile.mkdtemp(prefix="falcon_requery_")
 
     try:
-        sam_script = "/home/server/python/map_assistant_v1/backend/tools/sam_predict.py"
-        python_bin = "/home/server/miniconda3/envs/sam/bin/python"
+        falcon_script = _FALCON_SCRIPT_PATH
+        python_bin = _FALCON_PYTHON_BIN
 
         geometry_json = json.dumps(req.geometry)
         coarse_json = json.dumps(req.coarse_geojson)
 
-        cmd = [python_bin, "-u", sam_script, geometry_json, req.prompt, "--requery"]
+        cmd = [python_bin, "-u", falcon_script, geometry_json, req.prompt, "--requery"]
 
-        logger.info(f"SAM Requery command: {' '.join(cmd)}")
+        logger.info(f"Falcon Requery command: {' '.join(cmd)}")
         proc = subprocess.run(
             cmd,
             input=coarse_json,
@@ -4553,11 +4570,12 @@ async def sam_requery(req: SAMRequeryRequest):
             timeout=600,
             env={**os.environ,
                  "CUDA_VISIBLE_DEVICES": os.environ.get("CUDA_VISIBLE_DEVICES", "0"),
+                 "FALCON_SERVICE_URL": FALCON_SERVICE_URL,
                  }
         )
 
         if proc.returncode != 0:
-            logger.error(f"SAM Requery failed: {proc.stderr}")
+            logger.error(f"Falcon Requery failed: {proc.stderr}")
             raise HTTPException(status_code=500, detail=f"Requery 推理失败: {proc.stderr[:500]}")
 
         # 解析 JSON 输出（取最后一行）
@@ -4578,17 +4596,17 @@ async def sam_requery(req: SAMRequeryRequest):
 
         n_refined = sum(1 for f in result_json.get("features", [])
                         if f.get("properties", {}).get("refined"))
-        logger.info(f"SAM Requery done: {len(result_json.get('features', []))} features, {n_refined} refined")
+        logger.info(f"Falcon Requery done: {len(result_json.get('features', []))} features, {n_refined} refined")
         result_json["_task_id"] = task_id
         return result_json
 
     except subprocess.TimeoutExpired:
-        logger.error("SAM Requery timeout")
+        logger.error("Falcon Requery timeout")
         raise HTTPException(status_code=504, detail="Requery 推理超时")
     except HTTPException:
         raise
     except Exception as e:
-        logger.exception(f"SAM Requery error: {e}")
+        logger.exception(f"Falcon Requery error: {e}")
         raise HTTPException(status_code=500, detail=f"Requery 异常: {str(e)}")
     finally:
         try:
@@ -4596,692 +4614,6 @@ async def sam_requery(req: SAMRequeryRequest):
         except Exception:
             pass
 
-
-# ==============================
-# 标注模块 API（交互式遥感影像标注）
-# ==============================
-
-from tools.annotation_store import (
-    save as annotation_save,
-    save_batch,
-    load_by_session,
-    load_by_id as annotation_load_by_id,
-    delete as annotation_delete,
-    delete_by_session,
-    list_sessions,
-    export_geojson as annotation_export_geojson,
-    export_coco as annotation_export_coco,
-)
-
-
-class AnnotationItem(BaseModel):
-    id: str | None = None
-    session_id: str = ""
-    image_path: str = ""
-    label: str = ""
-    class_id: int | None = None
-    geometry: dict = {}
-    mask_path: str | None = None
-    source: str = "manual"
-    confidence: float | None = None
-    iteration: int = 0
-
-
-class AnnotationBatch(BaseModel):
-    annotations: list[AnnotationItem]
-
-
-@app.post("/api/annotations")
-async def api_save_annotations(req: AnnotationBatch):
-    """保存/批量保存标注"""
-    try:
-        items = [a.model_dump(exclude_none=False) for a in req.annotations]
-        results = save_batch(items)
-        return {"status": "ok", "count": len(results), "annotations": results}
-    except Exception as e:
-        logger.exception(f"Save annotations error: {e}")
-        raise HTTPException(status_code=500, detail=f"保存标注失败: {str(e)}")
-
-
-@app.get("/api/annotations")
-async def api_load_annotations(session_id: str):
-    """加载指定 session 的所有标注"""
-    try:
-        annotations = load_by_session(session_id)
-        return {"status": "ok", "session_id": session_id, "count": len(annotations), "annotations": annotations}
-    except Exception as e:
-        logger.exception(f"Load annotations error: {e}")
-        raise HTTPException(status_code=500, detail=f"加载标注失败: {str(e)}")
-
-
-@app.delete("/api/annotations/{annot_id}")
-async def api_delete_annotation(annot_id: str):
-    """删除单条标注"""
-    try:
-        ok = annotation_delete(annot_id)
-        if not ok:
-            raise HTTPException(status_code=404, detail="标注不存在")
-        return {"status": "ok", "deleted": annot_id}
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.exception(f"Delete annotation error: {e}")
-        raise HTTPException(status_code=500, detail=f"删除标注失败: {str(e)}")
-
-
-@app.get("/api/annotations/export")
-async def api_export_annotations(session_id: str, format: str = "geojson"):
-    """导出标注数据（geojson 或 coco 格式）"""
-    try:
-        if format == "coco":
-            result = annotation_export_coco(session_id)
-        else:
-            result = annotation_export_geojson(session_id)
-        return result
-    except Exception as e:
-        logger.exception(f"Export annotations error: {e}")
-        raise HTTPException(status_code=500, detail=f"导出标注失败: {str(e)}")
-
-
-@app.get("/api/annotations/sessions")
-async def api_list_annotation_sessions():
-    """列出所有标注 session"""
-    try:
-        sessions = list_sessions()
-        return {"status": "ok", "sessions": sessions}
-    except Exception as e:
-        logger.exception(f"List sessions error: {e}")
-        raise HTTPException(status_code=500, detail=f"列出 session 失败: {str(e)}")
-
-
-@app.delete("/api/annotations/sessions/{session_id}")
-async def api_delete_annotation_session(session_id: str):
-    """删除整个 session 的标注"""
-    try:
-        count = delete_by_session(session_id)
-        return {"status": "ok", "session_id": session_id, "deleted": count}
-    except Exception as e:
-        logger.exception(f"Delete session error: {e}")
-        raise HTTPException(status_code=500, detail=f"删除 session 失败: {str(e)}")
-
-
-# ==============================
-# 工作流会话 API
-# ==============================
-
-class WorkflowStartRequest(BaseModel):
-    title: str | None = "ReSAM 标注会话"
-
-
-@app.post("/api/workflow/start")
-async def api_workflow_start(req: WorkflowStartRequest):
-    """
-    创建标注工作流会话，返回 session_id。
-    复用现有 sessions.db 基础设施，会话类型标注为 "annotation"。
-    """
-    try:
-        import uuid
-        session_id = uuid.uuid4().hex[:12]
-
-        # 在标注表创建空 session 占位
-        from tools.annotation_store import save, _now_iso
-        placeholder = {
-            "id": f"_workflow_init_{session_id}",
-            "session_id": session_id,
-            "image_path": "",
-            "label": "__workflow__",
-            "class_id": None,
-            "geometry": json.dumps({"type": "Point", "coordinates": [0, 0]}),
-            "mask_path": None,
-            "source": "system",
-            "confidence": None,
-            "iteration": 0,
-            "created_at": _now_iso(),
-        }
-        save(placeholder)
-
-        # 可选：在 sessions.db 中同步创建记录
-        try:
-            from tools.schema_manager import get_conn as get_schema_conn
-            schema_conn = get_schema_conn()
-            cur = schema_conn.cursor()
-            cur.execute(
-                "INSERT OR IGNORE INTO sessions (id, title, type, created_at, updated_at) VALUES (?, ?, ?, datetime('now'), datetime('now'))",
-                (session_id, req.title or "ReSAM 标注会话", "annotation")
-            )
-            schema_conn.commit()
-        except Exception:
-            pass  # sessions 表可能不存在，忽略
-
-        logger.info(f"[Workflow] 创建标注会话: {session_id}, title={req.title}")
-        return {"status": "ok", "session_id": session_id, "title": req.title}
-    except Exception as e:
-        logger.exception(f"Workflow start error: {e}")
-        raise HTTPException(status_code=500, detail=f"创建工作流会话失败: {str(e)}")
-
-
-# ==============================
-# SSA 训练任务 API
-# ==============================
-
-# 训练任务状态追踪（内存中，服务重启后丢失属正常行为）
-_training_tasks: dict = {}
-
-
-class SAMTrainRequest(BaseModel):
-    session_ids: list[str] = []       # 标注 session IDs
-    epochs: int = 20
-    checkpoint_name: str = "buildings_v1"
-    image_dir: str = ""               # 影像目录（可选，默认使用 LOCAL_TIF 裁剪区域）
-    base_checkpoint: str = ""         # 基底模型路径（空 = 从零训练）
-    lora_rank: int = 4                # LoRA 秩（ReSAM）
-    training_method: str = "resam"    # 训练方法: resam | ssa
-
-
-@app.post("/api/sam-train")
-async def sam_train(req: SAMTrainRequest):
-    """
-    提交 SSA 微调训练任务（异步后台执行）。
-
-    从标注数据库导出数据 → 裁剪对应区域影像 → 执行 ssa_train.py
-    返回 task_id 用于进度查询。
-    """
-    import subprocess
-    import uuid
-    import threading
-    import sys
-
-    task_id = uuid.uuid4().hex[:12]
-    _training_tasks[task_id] = {
-        "status": "pending",
-        "epoch": 0,
-        "total_epochs": req.epochs,
-        "loss": None,
-        "val_loss": None,
-        "progress_pct": 0,
-        "message": "任务已创建，等待启动...",
-        "output_path": "",
-        "error": None,
-    }
-
-    def _run_training():
-        """后台执行训练流程"""
-        task = _training_tasks[task_id]
-        task["status"] = "running"
-        task["message"] = "正在准备训练数据..."
-
-        try:
-            # 1. 从标注数据库导出训练数据
-            annotations_dir = tempfile.mkdtemp(prefix="ssa_train_data_")
-            annotations_json = os.path.join(annotations_dir, "annotations.json")
-
-            all_annotations = []
-            for sid in req.session_ids:
-                sess_anns = load_by_session(sid)
-                # 转换为训练格式
-                for ann in sess_anns:
-                    all_annotations.append({
-                        "image_path": ann.get("image_path", ""),
-                        "label": ann.get("label", ""),
-                        "geometry": ann.get("geometry", {}),
-                        "mask_path": ann.get("mask_path", ""),
-                    })
-
-            if not all_annotations:
-                task["status"] = "failed"
-                task["error"] = "无标注数据可训练（session 为空或无有效标注）"
-                task["message"] = "训练失败：无数据"
-                return
-
-            with open(annotations_json, 'w') as f:
-                json.dump(all_annotations, f)
-
-            task["message"] = f"已导出 {len(all_annotations)} 条标注，启动训练..."
-            logger.info(f"[SAM-Train] task={task_id}, 导出 {len(all_annotations)} 条标注")
-
-            # 2. 确定影像目录（使用本地 TIF 或请求指定目录）
-            image_dir = req.image_dir or "/home/server/python/GIS/output"
-            if not os.path.isdir(image_dir):
-                image_dir = tempfile.mkdtemp(prefix="ssa_images_")
-
-            # 3. 执行训练脚本
-            # 持久化存储 checkpoint
-            ckpt_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "checkpoints")
-            os.makedirs(ckpt_dir, exist_ok=True)
-            output_path = os.path.join(ckpt_dir, f"sam3_ssa_{req.checkpoint_name}.pt")
-            task["output_path"] = output_path
-
-            python_bin = sys.executable
-
-            # 根据训练方法选择脚本
-            if req.training_method == "resam":
-                train_script = "/home/server/python/map_assistant_v1/backend/tools/resam_train.py"
-                cmd = [
-                    python_bin, "-u", train_script,
-                    "--annotations", annotations_json,
-                    "--image-dir", image_dir,
-                    "--epochs", str(req.epochs),
-                    "--batch-size", "2",
-                    "--lora-rank", str(req.lora_rank),
-                    "--output", output_path,
-                ]
-            else:
-                train_script = "/home/server/python/map_assistant_v1/backend/tools/ssa_train.py"
-                cmd = [
-                    python_bin, "-u", train_script,
-                    "--annotations", annotations_json,
-                    "--image-dir", image_dir,
-                    "--epochs", str(req.epochs),
-                    "--batch-size", "4",
-                    "--output", output_path,
-                ]
-
-            # 基底模型（在已有 checkpoint 基础上继续训练）
-            if req.base_checkpoint and os.path.exists(req.base_checkpoint):
-                cmd.extend(["--base-checkpoint" if req.training_method != "resam" else "--resume", req.base_checkpoint])
-                task["message"] = f"基于 {os.path.basename(req.base_checkpoint)} 继续训练..."
-
-            logger.info(f"[SAM-Train] cmd: {' '.join(cmd)}")
-            task["message"] = "训练中..."
-
-            # 使用 Popen 实时读取输出，捕获 epoch 进度
-            proc = subprocess.Popen(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                env={**os.environ, "CUDA_VISIBLE_DEVICES": os.environ.get("CUDA_VISIBLE_DEVICES", "0")},
-            )
-
-            for line in proc.stdout:
-                line = line.strip()
-                # 解析 epoch 进度: "[ReSAM] Epoch 02/20 ..." 或 "[SSA-Train] Epoch 02/10 ..."
-                if "Epoch" in line and "/" in line:
-                    try:
-                        parts = line.split("|")
-                        ep_part = parts[0].strip()  # "Epoch 02/10"
-                        ep_str = ep_part.split()[1]  # "02/10"
-                        cur_ep, total_ep = ep_str.split("/")
-                        task["epoch"] = int(cur_ep)
-                        task["total_epochs"] = int(total_ep)
-                        task["progress_pct"] = int(int(cur_ep) / int(total_ep) * 100)
-
-                        for part in parts[1:]:
-                            part = part.strip()
-                            if "train_loss=" in part:
-                                task["loss"] = float(part.split("=")[1].split()[0])
-                            elif "val_loss=" in part:
-                                task["val_loss"] = float(part.split("=")[1].split()[0])
-                    except Exception:
-                        pass
-
-                logger.info(f"[SAM-Train {task_id}] {line}")
-
-            proc.wait()
-            if proc.returncode != 0:
-                task["status"] = "failed"
-                task["error"] = f"训练脚本异常退出 (code={proc.returncode})"
-                task["message"] = "训练失败"
-            else:
-                task["status"] = "complete"
-                task["progress_pct"] = 100
-                val_info = ""
-                if task.get("val_loss") is not None:
-                    val_info = f", val_loss={task['val_loss']:.4f}"
-                task["message"] = f"训练完成！train_loss={task.get('loss', '—')}{val_info} | {output_path}"
-                # 记录元数据（类别、时间、loss、标注数、验证信息）
-                meta_path = output_path.replace(".pt", ".meta.json")
-                try:
-                    unique_labels = sorted(set(a.get("label", "") for a in all_annotations if a.get("label")))
-                    meta = {
-                        "name": req.checkpoint_name,
-                        "classes": unique_labels,
-                        "epochs": req.epochs,
-                        "final_loss": task.get("loss"),
-                        "val_loss": task.get("val_loss"),
-                        "annotation_count": len(all_annotations),
-                        "session_ids": req.session_ids,
-                        "created_at": dt.now().isoformat(),
-                    }
-                    with open(meta_path, 'w') as f:
-                        json.dump(meta, f, ensure_ascii=False)
-                except Exception as me:
-                    logger.warning(f"[SAM-Train] 元数据保存失败: {me}")
-                logger.info(f"[SAM-Train] task={task_id} 完成: {output_path}")
-
-        except Exception as e:
-            logger.exception(f"[SAM-Train] task={task_id} 异常: {e}")
-            task["status"] = "failed"
-            task["error"] = str(e)
-            task["message"] = f"训练异常: {str(e)[:100]}"
-
-    # 启动后台线程
-    thread = threading.Thread(target=_run_training, daemon=True)
-    thread.start()
-
-    return {"task_id": task_id, "status": "pending"}
-
-
-@app.get("/api/sam-train/{task_id}/status")
-async def sam_train_status(task_id: str):
-    """查询 SSA 训练任务进度"""
-    task = _training_tasks.get(task_id)
-    if not task:
-        raise HTTPException(status_code=404, detail="训练任务不存在或已过期")
-    return {
-        "task_id": task_id,
-        **task,
-    }
-
-
-# ==============================
-# SSA Checkpoint 版本管理 API
-# ==============================
-
-CHECKPOINT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "checkpoints")
-ACTIVE_CONFIG = os.path.join(CHECKPOINT_DIR, "active.json")
-
-
-def _get_active_checkpoint():
-    """读取当前激活的 checkpoint 路径"""
-    try:
-        if os.path.exists(ACTIVE_CONFIG):
-            with open(ACTIVE_CONFIG, 'r') as f:
-                data = json.load(f)
-            active_path = data.get("checkpoint", "")
-            if active_path and os.path.exists(active_path):
-                return data
-    except Exception:
-        pass
-    return {"checkpoint": "", "name": "默认 (SAM3 原生)"}
-
-
-def _set_active_checkpoint(checkpoint_path, name):
-    """写入激活的 checkpoint 配置"""
-    os.makedirs(CHECKPOINT_DIR, exist_ok=True)
-    data = {"checkpoint": checkpoint_path, "name": name, "set_at": dt.now().isoformat()}
-    with open(ACTIVE_CONFIG, 'w') as f:
-        json.dump(data, f, ensure_ascii=False)
-    # 同步更新环境变量，让 sam_predict 模块感知
-    os.environ["SAM3_SSA_CHECKPOINT"] = checkpoint_path
-    return data
-
-
-# ==============================
-# 点击提示分割 API (ReSAM)
-# ==============================
-
-class PointPredictRequest(BaseModel):
-    points: list = []           # [[x, y], ...] 像素坐标
-    labels: list = []           # [1, 0, ...] 1=正提示，0=负提示
-    image_bounds: dict = {}     # {"north", "south", "east", "west"}
-    image_path: str = ""        # 可选：直接指定图片路径
-    session_id: str = ""        # 当前标注 session
-    prompt: str = "object"      # 文本提示词
-
-
-@app.post("/api/sam-predict-point")
-async def sam_predict_point(req: PointPredictRequest):
-    """
-    基于点提示的 SAM 分割。
-    用户在地图上点击正点/负点，根据点位置生成分割 mask。
-
-    通过子进程调用 sam 环境运行 sam_predict.py --point，
-    返回 GeoJSON 多边形（与文字提示接口格式一致）。
-    """
-    if not req.points or not req.labels:
-        return {"polygons": [], "message": "无提示点"}
-
-    if len(req.points) != len(req.labels):
-        raise HTTPException(status_code=400, detail="points 和 labels 数量不匹配")
-
-    # 如果前端未提供 image_bounds，从点坐标自动计算（带约 300m 边距）
-    if not req.image_bounds:
-        xs = [p[0] for p in req.points]
-        ys = [p[1] for p in req.points]
-        margin = 0.003  # ~300m
-        req.image_bounds = {
-            "west": min(xs) - margin,
-            "east": max(xs) + margin,
-            "south": min(ys) - margin,
-            "north": max(ys) + margin,
-        }
-
-    try:
-        import subprocess as _sp
-
-        sam_script = "/home/server/python/map_assistant_v1/backend/tools/sam_predict.py"
-        python_bin = "/home/server/miniconda3/envs/sam/bin/python"
-
-        # 构建输入 JSON
-        input_data = {
-            "points": req.points,
-            "labels": req.labels,
-            "image_bounds": req.image_bounds if req.image_bounds else None,
-            "image_path": req.image_path if req.image_path else None,
-            "prompt": req.prompt or "object",
-        }
-
-        cmd = [python_bin, "-u", sam_script, "--point"]
-        logger.info(f"[SAM-Point] cmd: {' '.join(cmd)}, points={len(req.points)}")
-
-        proc = _sp.run(
-            cmd,
-            input=json.dumps(input_data),
-            capture_output=True,
-            text=True,
-            timeout=60,
-            env={**os.environ, "CUDA_VISIBLE_DEVICES": os.environ.get("CUDA_VISIBLE_DEVICES", "0")},
-        )
-
-        if proc.returncode != 0:
-            err_msg = (proc.stderr or "")[:500]
-            logger.error(f"[SAM-Point] 子进程失败: {err_msg}")
-            raise HTTPException(status_code=500, detail=f"点提示分割失败: {err_msg[:200]}")
-
-        # 解析 stdout 中的最后一行 JSON
-        stdout_lines = [l for l in proc.stdout.strip().splitlines() if l.strip()]
-        if not stdout_lines:
-            return {"polygons": [], "message": "模型无输出"}
-
-        result = json.loads(stdout_lines[-1])
-        return result
-
-    except _sp.TimeoutExpired:
-        logger.error("[SAM-Point] 子进程超时")
-        raise HTTPException(status_code=504, detail="点提示分割超时")
-    except json.JSONDecodeError as e:
-        logger.error(f"[SAM-Point] 解析输出失败: {e}")
-        raise HTTPException(status_code=500, detail="点提示分割输出解析失败")
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.exception(f"[SAM-Point] 点提示分割失败: {e}")
-        raise HTTPException(status_code=500, detail=f"点提示分割失败: {str(e)[:200]}")
-
-
-@app.get("/api/sam-checkpoints")
-async def list_checkpoints():
-    """列出所有 SSA checkpoint 版本"""
-    items = []
-    # 默认选项
-    items.append({
-        "name": "默认 (SAM3 原生)",
-        "path": "",
-        "classes": [],
-        "epochs": 0,
-        "annotation_count": 0,
-        "created_at": "",
-        "active": not bool(_get_active_checkpoint().get("checkpoint")),
-    })
-    active_info = _get_active_checkpoint()
-    active_path = active_info.get("checkpoint", "")
-
-    try:
-        os.makedirs(CHECKPOINT_DIR, exist_ok=True)
-        for fname in sorted(os.listdir(CHECKPOINT_DIR), reverse=True):
-            if not fname.endswith(".pt"):
-                continue
-            ckpt_path = os.path.join(CHECKPOINT_DIR, fname)
-            meta_path = ckpt_path.replace(".pt", ".meta.json")
-            name = fname.replace("sam3_ssa_", "").replace(".pt", "")
-
-            # 读取元数据
-            meta = {"classes": [], "epochs": 0, "annotation_count": 0, "created_at": ""}
-            if os.path.exists(meta_path):
-                try:
-                    with open(meta_path, 'r') as f:
-                        meta = json.load(f)
-                except Exception:
-                    pass
-
-            chart_file = ckpt_path.replace(".pt", "_chart.png")
-            # 检测训练方法
-            training_method = meta.get("training_method", "ssa")
-            # 也可以从 checkpoint 文件本身检测
-            try:
-                import torch as _t
-                _ckpt = _t.load(ckpt_path, map_location='cpu')
-                if 'lora' in _ckpt and 'training_method' in _ckpt:
-                    training_method = 'ReSAM'
-                    meta['lora_rank'] = _ckpt.get('metadata', {}).get('lora_rank', 4)
-            except Exception:
-                pass
-
-            items.append({
-                "name": meta.get("name", name),
-                "path": ckpt_path,
-                "classes": meta.get("classes", []),
-                "epochs": meta.get("epochs", 0),
-                "annotation_count": meta.get("annotation_count", 0),
-                "final_loss": meta.get("final_loss"),
-                "val_loss": meta.get("val_loss"),
-                "created_at": meta.get("created_at", ""),
-                "active": ckpt_path == active_path,
-                "has_chart": os.path.exists(chart_file),
-                "chart_url": f"/api/sam-checkpoints/{name}/chart" if os.path.exists(chart_file) else None,
-                "training_method": training_method,
-                "lora_rank": meta.get("lora_rank"),
-            })
-    except Exception as e:
-        logger.warning(f"列出 checkpoint 失败: {e}")
-
-    return {"checkpoints": items, "active": active_info}
-
-
-class CheckpointActivateRequest(BaseModel):
-    path: str = ""   # 空字符串 = 恢复默认（不使用 adapter）
-
-
-@app.post("/api/sam-checkpoints/activate")
-async def activate_checkpoint(req: CheckpointActivateRequest):
-    """切换激活的 SSA checkpoint 版本"""
-    if req.path and not os.path.exists(req.path):
-        raise HTTPException(status_code=404, detail=f"checkpoint 不存在: {req.path}")
-
-    if not req.path:
-        # 恢复默认
-        _set_active_checkpoint("", "默认 (SAM3 原生)")
-        # 清除模型缓存，让下次推理使用原生 SAM3
-        try:
-            from tools.sam_predict import reload_sam_model
-            reload_sam_model()
-        except Exception:
-            pass
-        logger.info("[Checkpoint] 已恢复为默认 SAM3 原生模式")
-        return {"status": "ok", "active": {"checkpoint": "", "name": "默认 (SAM3 原生)"}}
-
-    name = os.path.basename(req.path).replace("sam3_ssa_", "").replace(".pt", "")
-    result = _set_active_checkpoint(req.path, name)
-    # 清除模型缓存，让下次推理使用新 checkpoint
-    try:
-        from tools.sam_predict import reload_sam_model
-        reload_sam_model()
-    except Exception:
-        pass
-    logger.info(f"[Checkpoint] 已激活: {name} ({req.path})")
-    return {"status": "ok", "active": result}
-
-
-@app.get("/api/sam-checkpoints/active")
-async def get_active_checkpoint():
-    """查询当前激活的 checkpoint"""
-    return _get_active_checkpoint()
-
-
-class CheckpointRenameRequest(BaseModel):
-    path: str
-    new_name: str
-
-
-@app.post("/api/sam-checkpoints/rename")
-async def rename_checkpoint(req: CheckpointRenameRequest):
-    """重命名 checkpoint 的显示名称（写入 meta.json）"""
-    if not req.path or not os.path.exists(req.path):
-        raise HTTPException(status_code=404, detail="checkpoint 不存在")
-    meta_path = req.path.replace(".pt", ".meta.json")
-    meta = {}
-    if os.path.exists(meta_path):
-        try:
-            with open(meta_path, 'r') as f:
-                meta = json.load(f)
-        except Exception:
-            pass
-    meta["name"] = req.new_name.strip()
-    with open(meta_path, 'w') as f:
-        json.dump(meta, f, ensure_ascii=False, indent=2)
-    logger.info(f"[Checkpoint] 重命名: {req.path} -> {req.new_name}")
-    return {"status": "ok", "name": meta["name"]}
-
-
-@app.delete("/api/sam-checkpoints")
-async def delete_checkpoint(path: str):
-    """删除指定的 checkpoint 及其关联文件"""
-    if not path:
-        raise HTTPException(status_code=400, detail="路径不能为空")
-    # 安全检查：必须在 checkpoint 目录内
-    if not path.startswith(CHECKPOINT_DIR):
-        raise HTTPException(status_code=403, detail="不允许删除该路径")
-    if not os.path.exists(path):
-        raise HTTPException(status_code=404, detail="文件不存在")
-    
-    # 不允许删除当前激活的 checkpoint
-    active_info = _get_active_checkpoint()
-    if active_info.get("checkpoint") == path:
-        raise HTTPException(status_code=400, detail="不能删除当前激活的模型，请先切换到其他模型")
-    
-    # 删除关联文件: .pt, .meta.json, _chart.png, _best.pt, _best_chart.png
-    base = path.replace(".pt", "")
-    deleted = []
-    for suffix in [".pt", ".meta.json", "_chart.png", "_best.pt", "_best_chart.png", "_best.meta.json"]:
-        fp = base + suffix
-        if os.path.exists(fp):
-            os.remove(fp)
-            deleted.append(os.path.basename(fp))
-    
-    logger.info(f"[Checkpoint] 删除: {deleted}")
-    return {"status": "ok", "deleted": deleted}
-
-
-@app.get("/api/sam-checkpoints/{checkpoint_name}/chart")
-async def get_checkpoint_chart(checkpoint_name: str):
-    """返回指定 checkpoint 的训练曲线图表（PNG）"""
-    from fastapi.responses import FileResponse
-    
-    # 安全检查：防止路径遍历
-    safe_name = os.path.basename(checkpoint_name)
-    chart_path = os.path.join(CHECKPOINT_DIR, f"sam3_ssa_{safe_name}_chart.png")
-    
-    if not os.path.exists(chart_path):
-        # 尝试不带 sam3_ssa_ 前缀的路径
-        alt_path = os.path.join(CHECKPOINT_DIR, f"{safe_name}_chart.png")
-        if os.path.exists(alt_path):
-            chart_path = alt_path
-        else:
-            raise HTTPException(status_code=404, detail=f"图表不存在: {safe_name}")
-    
-    return FileResponse(chart_path, media_type="image/png",
-                         headers={"Cache-Control": "no-cache"})
 
 
 if __name__ == "__main__":

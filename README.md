@@ -6,7 +6,7 @@
 
 一句话，驱动一张图。一个意图，调度整个空间计算集群。
 
-*LLM Agent × 多引擎地图 × 混合检索 RAG × 长短期记忆 × 遥感 AI*
+*LLM Agent × 三引擎地图 × 混合检索 RAG × 长短期记忆 × 遥感视觉大模型*
 
 [![Python](https://img.shields.io/badge/Python-3.10+-3776AB?style=flat-square&logo=python&logoColor=white)]()
 [![FastAPI](https://img.shields.io/badge/FastAPI-009688?style=flat-square&logo=fastapi&logoColor=white)]()
@@ -21,7 +21,7 @@
 ![Last Commit](https://img.shields.io/github/last-commit/PotatoH-cmd/Smart_Map?style=flat-square&color=9370DB)
 ![Repo Size](https://img.shields.io/github/repo-size/PotatoH-cmd/Smart_Map?style=flat-square&color=FF69B4)
 
-对话即操作 · 越用越懂你 · 三引擎同屏 · 报告一键生成
+对话即操作 · 越用越懂你 · 三引擎同屏 · 遥感识别开口即测
 
 </div>
 
@@ -31,7 +31,7 @@
 
 传统 GIS 的菜单地狱、命令行门槛、数据孤岛，在这里被压缩成一句自然语言。你说：
 
-> “加载北汝河采区的高分影像，叠加河道红线，再切到三维看看实景”
+> "加载北汝河采区的高分影像，叠加河道红线，再切到三维看看实景"
 
 系统自动完成意图识别、计划编排、工具调度与引擎联动：
 
@@ -55,7 +55,8 @@ sequenceDiagram
 | 数据问答 | 种子场可采区去年采了多少方？ | PostGIS 查询 → 图表渲染 → 结论解读 |
 | 政策检索 | 采砂现场监管有什么要求？ | 混合检索 RAG → 精排 → 带出处回答 |
 | 空间分析 | 红线外 500 米缓冲区里有哪些采区？ | QGIS MCP 直驱 → 缓冲叠加 → 结果上图 |
-| 遥感监测 | 对比这两期影像，河道有什么变化？ | SAM 分割 → 双时相差异 → 侵占预警 |
+| 遥感识别 | 在这个框里找出所有采砂坑 | Falcon 分割 → 实例上图 → SHP 一键下载 |
+| 变化检测 | 对比这两期影像，河道有什么变化？ | SAM3 语义分割 → 双时相差异 → 侵占预警 |
 | 报告生成 | 出一份本月监测报告 | 多源数据融合 → Word 自动成文 |
 
 ---
@@ -65,7 +66,7 @@ sequenceDiagram
 - **三层记忆智能体** — 短期上下文预算 + 长期向量知识 + 用户事实抽取，对话有上下文，跨会话有积累。
 - **混合检索 RAG** — Milvus 向量召回 + BM25(jieba) 关键词召回，RRF 融合后 gte-rerank-v2 精排，中文召回质量拉满。
 - **三地图引擎** — Leaflet 2D、Cesium 3D、GeoLibre 实景地球同屏联动，深链接动态注入图层。
-- **遥感 AI** — SAM/SAM3 分割，双时相影像变化检测，河道侵占自动识别。
+- **遥感视觉大模型** — Falcon-Perception 自由文本目标分割（0 实例自动降级重试 + 逐实例精修），SegEarth-OV-3 双时相变化检测。
 - **QGIS MCP** — 大模型直驱 QGIS 空间分析引擎，缓冲区/叠加/裁剪开口即算。
 - **一键报告** — RTK 测点 + 无人机影像 + 监测数据，Word 报告自动成文。
 - **断线自愈** — Run 生命周期持久化，SSE 断线重连 + 事件流补拉 + 检查点恢复。
@@ -84,7 +85,7 @@ graph TB
         Map2D["Leaflet 2D"]
         Globe["GeoLibre 地球<br/>iframe 深链接注入"]
         Map3D["Cesium 3D"]
-        Panels["管理面板群<br/>SAM · 切片 · 知识库 · 标注"]
+        Panels["管理面板群<br/>Falcon · 切片 · 知识库"]
     end
 
     subgraph BE["后端 · FastAPI :8006"]
@@ -97,6 +98,8 @@ graph TB
         LLM["Qwen 系列 (DashScope)"]
         EMB["text-embedding-v3"]
         RERANK["gte-rerank-v2"]
+        FALCON["Falcon-Perception :8765<br/>常驻推理服务"]
+        SAM3["SegEarth-OV-3<br/>SAM3 变化检测"]
     end
 
     subgraph DATA["数据与服务层"]
@@ -114,6 +117,7 @@ graph TB
     Memory --> EMB & RERANK & MILVUS
     Graph <--> QGIS
     Graph --> GS & PG
+    Graph -.-> FALCON & SAM3
     Memory --> KUZU
 
     style FE fill:#eff6ff,stroke:#2563eb
@@ -212,7 +216,44 @@ flowchart LR
 | 知识 | `knowledge_base_tool` LlamaIndex 混合检索（RagFlow 可切换） |
 | 分析 | `qgis_mcp_tool` QGIS 空间分析 · `spatial_processing_tool` 矢量处理 · `spatial_reference_tool` 坐标转换 |
 | 报告 | `report_generator_tool` Word 报告 · `caisha_report_tool` 采砂成果报告 |
-| 遥感 | SAM 分割模块 · 双时相变化检测（面板直调） |
+| 遥感 | Falcon 自由文本分割 · SAM3 双时相变化检测（面板直调） |
+
+---
+
+## 🛰️ 遥感 AI：Falcon 检测流水线
+
+前端 Falcon 面板框选任意区域、输入任意中文目标（"采砂坑"、"高压线塔"、"房屋"…），即可完成开放词汇分割并导出成果。
+
+```mermaid
+flowchart TB
+    A(["框选区域 + 中文目标"]) --> B["/api/falcon-detect"]
+    B --> C["falcon_detect.py<br/>影像获取 · 瓦片切分"]
+    C --> D{"resolve_query"}
+    D -->|"高频词快路径<br/>内置映射"| E["英文 query"]
+    D -->|"其余<br/>qwen-flash 生成 3 候选"| E
+    E --> F["falcon_service :8765<br/>常驻推理 · 亚秒级/瓦片"]
+    F --> G["mask 线性融合<br/>多边形提取 → GeoJSON"]
+    G --> H{"主候选 0 实例？"}
+    H -->|是| D
+    H -->|否| I["实例上图<br/>面积/数量统计"]
+    I --> J["SHP 打包下载<br/>/api/falcon-download"]
+
+    style B fill:#fffbeb,stroke:#d97706
+    style F fill:#fdf2f8,stroke:#db2777
+    style J fill:#f0fdf4,stroke:#16a34a
+```
+
+**设计要点**
+
+| 特性 | 说明 |
+|------|------|
+| 常驻推理服务 | `falcon_service.py` 独立 FastAPI 服务（默认 :8765），模型只加载一次，子进程模式 ~13s 冷启动归零 |
+| 自由文本零注册 | 任意中文目标 → 内置高频映射 + qwen-flash 翻译兜底 → 英文 query 直查，无需词表 |
+| 自动降级重试 | 3 候选 query，主候选 0 实例自动换备选重试，单次仅 +0.35s |
+| 逐实例精修 | `/api/falcon-requery` 裁剪单实例区域重新推理，召回补漏，结果标记"精修" |
+| 成果直出 | 实例上图 + 统计面板 + SHP/ZIP 一键下载 |
+
+变化检测走另一条链路：`sam_predict.py` 基于 SegEarth-OV-3 SAM3（800M 参数、模块级单例），双时相影像语义分割后求差异，河道侵占自动预警。
 
 ---
 
@@ -221,7 +262,7 @@ flowchart LR
 ```text
 Smart_Map/
 ├── backend/
-│   ├── main.py                    # FastAPI 入口 · SSE · Run 生命周期
+│   ├── main.py                    # FastAPI 入口 · SSE · Run 生命周期 · /api/falcon-*
 │   ├── prompts.py                 # 提示词 SSoT 单一来源
 │   ├── agents/
 │   │   ├── task_executor.py       # LangGraph 状态图
@@ -231,7 +272,11 @@ Smart_Map/
 │   │   ├── context_manager.py     # 上下文预算 · 滚动压缩
 │   │   ├── fact_memory.py         # 用户事实记忆
 │   │   └── agent_harness.py       # Agent 分派中枢
-│   ├── tools/                     # 13 注册工具（见上表）
+│   ├── tools/
+│   │   ├── falcon_detect.py       # Falcon 检测流水线（影像/瓦片/融合/GeoJSON）
+│   │   ├── falcon_service.py      # Falcon 常驻推理服务 :8765
+│   │   ├── sam_predict.py         # SegEarth-OV-3 SAM3 变化检测
+│   │   └── ...                    # 其余注册工具
 │   ├── scripts/
 │   │   ├── backup_memory.sh       # 每日备份（DB+向量+图谱）
 │   │   ├── kb_rebuild.py          # 知识库三级恢复
@@ -239,7 +284,9 @@ Smart_Map/
 │   └── static/geolibre_projects/  # GeoLibre 动态项目配置
 ├── frontend/src/
 │   ├── App.jsx                    # 主入口
-│   └── components/                # Map · Cesium · SAM · 知识库面板
+│   └── components/
+│       ├── FalconPanel.jsx        # 遥感识别面板（框选/进度/精修/下载）
+│       └── ...                    # Map · Cesium · 知识库面板
 ├── deploy/                        # nginx · GeoServer 编排
 └── docker/qgis-mcp/               # QGIS MCP 容器
 ```
@@ -248,7 +295,7 @@ Smart_Map/
 
 ## 🚀 快速开始
 
-环境要求：Python 3.10+、Node 16+、PostgreSQL+PostGIS 14+、GDAL 3.6+；Milvus / GeoServer / Docker 可选。
+环境要求：Python 3.10+、Node 16+、PostgreSQL+PostGIS 14+、GDAL 3.6+；Milvus / GeoServer / Docker / GPU 可选。
 
 ```bash
 # 1. 克隆
@@ -283,6 +330,7 @@ MAPASSIST_DB_PATH=./sessions.db     # 会话/Run/事实记忆
 FACT_MEMORY_ENABLED=1               # 用户事实记忆开关
 CONTEXT_HISTORY_TURNS=8             # 短期记忆预算
 GEOSERVER_URL=http://127.0.0.1:8088/geoserver
+FALCON_SERVICE_URL=http://127.0.0.1:8765   # Falcon 常驻推理服务
 
 # frontend/.env
 PORT=3004
@@ -292,7 +340,22 @@ REACT_APP_TIANDITU_TOKEN=xxx        # 可选
 </details>
 
 <details>
-<summary>PM2 生产部署</summary>
+<summary>遥感 AI（Falcon 推理服务，需 GPU）</summary>
+
+`falcon_service.py` 依赖外部 `falcon_perception` 推理包与 HF 权重（0.6B，bfloat16 约 2GB 显存），不随本仓库分发。部署好后通过 PM2 常驻：
+
+```bash
+cd backend/tools
+FALCON_HF_REVISION=<version> pm2 start falcon_service.py --name falcon-service \
+  --interpreter python -- --port 8765
+curl http://127.0.0.1:8765/health   # {status, model_id, device, vram_mb, ready}
+```
+
+未部署时仅遥感识别面板不可用，其余功能不受影响。
+</details>
+
+<details>
+<summary>PM2 生产部署（主后端）</summary>
 
 ```bash
 npm install -g pm2
@@ -315,6 +378,12 @@ pm2 status && pm2 logs map-assistant-backend
 <summary>没装 Milvus 会怎样？</summary>
 
 自动回退 SimpleVectorStore（本地 JSON 向量库），功能完整，仅大规模检索性能略低；BM25/Rerank 失败同样静默降级为纯向量。
+</details>
+
+<details>
+<summary>没有 GPU 能用遥感识别吗？</summary>
+
+Falcon 常驻服务需要 GPU（约 2GB 显存，可与 vLLM 共卡）。未部署时对话、地图、知识库等主链路完全正常，仅遥感面板提示服务不可达。
 </details>
 
 <details>
@@ -343,6 +412,10 @@ GeoLibre 需独立部署（nginx 托管，默认 :8090），后端通过 `/api/g
 |------|------|
 | `POST /chat/stream` | 核心对话（SSE 流式 · 断线可恢复） |
 | `GET /api/memory/facts` | 用户事实记忆管理 |
+| `POST /api/falcon-detect` | Falcon 自由文本目标识别（异步子进程） |
+| `GET /api/falcon-progress/{task_id}` | 检测进度追踪 |
+| `POST /api/falcon-requery` | 逐实例精修重推理 |
+| `POST /api/falcon-download` | 结果 SHP/ZIP 打包下载 |
 | `GET /api/geolibre/project` | GeoLibre 动态图层注入 |
 | `POST /gis/*` | GIS 工具（坐标/矢量/分析） |
 | `POST /tiles/*` | 切片发布管理 |
@@ -364,6 +437,7 @@ GeoLibre 需独立部署（nginx 托管，默认 :8090），后端通过 `/api/g
 - [x] 用户事实记忆（抽取/注入/管理）
 - [x] GeoLibre 三维工作台集成
 - [x] Run 断线重连与检查点恢复
+- [x] Falcon 开放词汇遥感识别（常驻服务 + 降级重试 + 精修）
 - [ ] Kuzu 知识图谱摄取管线
 - [ ] 多用户体系与事实隔离
 - [ ] 语音交互

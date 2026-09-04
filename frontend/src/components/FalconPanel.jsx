@@ -1,10 +1,8 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import L from 'leaflet';
 import useLeafletDraw from '../hooks/useLeafletDraw';
-import { useReSAMWorkflow } from '../hooks/useReSAMWorkflow';
-import WorkflowStepper from './WorkflowStepper';
 
-const SAMPanel = ({ mapManager }) => {
+const FalconPanel = ({ mapManager }) => {
   const [drawMode, setDrawMode] = useState('rectangle');
   const [prompt, setPrompt] = useState('');
   const [isRunning, setIsRunning] = useState(false);
@@ -25,10 +23,6 @@ const SAMPanel = ({ mapManager }) => {
   const pollRef = useRef(null);
   const [requeryRunning, setRequeryRunning] = useState(false);
   const [selectedFeatIdx, setSelectedFeatIdx] = useState(null);
-  const [workflowMode, setWorkflowMode] = useState(false);
-
-  // ── ReSAM 工作流 Hook（串联 SAM→标注→训练闭环） ──
-  const workflow = useReSAMWorkflow();
 
   // ── 共享绘制 Hook（替代内联绘制逻辑） ──
   const {
@@ -40,7 +34,7 @@ const SAMPanel = ({ mapManager }) => {
     getDrawnBounds,
     getDrawCount,
   } = useLeafletDraw(mapManager, {
-    paneName: 'samDrawPane',
+    paneName: 'falconDrawPane',
     paneZIndex: 900,
     style: {
       color: '#ff6b00',
@@ -157,7 +151,7 @@ const SAMPanel = ({ mapManager }) => {
     if (pollRef.current) clearInterval(pollRef.current);
     pollRef.current = setInterval(async () => {
       try {
-        const r = await fetch(`/api/sam-progress/${id}`);
+        const r = await fetch(`/api/falcon-progress/${id}`);
         if (!r.ok) return;
         const d = await r.json();
         let pct = d.total > 0 ? Math.round((d.current / Math.max(d.total, 1)) * 100) : 0;
@@ -185,7 +179,7 @@ const SAMPanel = ({ mapManager }) => {
     };
     addLog('加载测试结果...');
     try {
-      const res = await fetch('/api/sam-test-result');
+      const res = await fetch('/api/falcon-test-result');
       const data = await res.json();
       if (!data.features || data.features.length === 0) {
         addLog('测试数据不可用', 'error');
@@ -199,7 +193,7 @@ const SAMPanel = ({ mapManager }) => {
           style: { color: '#e53e3e', weight: 2, fillColor: '#fc8181', fillOpacity: 0.4 },
           onEachFeature: (feature, l) => {
             const p = feature.properties || {};
-            l.bindPopup(`<b>SAM 识别结果</b><br/>目标: 建筑<br/>面积: ${p.area_m2 || ''} m² (${p.area_mu || ''} 亩)`);
+            l.bindPopup(`<b>Falcon 识别结果</b><br/>目标: 建筑<br/>面积: ${p.area_m2 || ''} m² (${p.area_mu || ''} 亩)`);
           },
         });
         layer.addTo(mapManager.map);
@@ -215,7 +209,7 @@ const SAMPanel = ({ mapManager }) => {
     }
   };
 
-  // 运行 SAM 检测（SSE 流式）
+  // 运行 Falcon 检测（SSE 流式）
   const runDetect = async () => {
     if (!drawnItemsRef.current || drawnItemsRef.current.getLayers().length === 0) {
       alert('请先在地图上绘制识别区域');
@@ -236,7 +230,7 @@ const SAMPanel = ({ mapManager }) => {
       setProgress(prev => [...prev, { text, tone, time: new Date().toLocaleTimeString() }]);
     };
 
-    addLog('开始 SAM 目标识别...');
+    addLog('开始 Falcon 目标识别...');
 
     try {
       const layers = drawnItemsRef.current.getLayers();
@@ -257,7 +251,7 @@ const SAMPanel = ({ mapManager }) => {
       addLog(`识别模式：${preciseMode ? '🎯 精度优先（瓦片推理）' : '⚡ 快速模式（单次推理）'}`);
 
       // ── SSE 流式请求 ──
-      const res = await fetch('/api/sam-detect', {
+      const res = await fetch('/api/falcon-detect', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Accept': 'text/event-stream' },
         body: JSON.stringify({
@@ -344,7 +338,7 @@ const SAMPanel = ({ mapManager }) => {
             const areaMu = p.area_mu ? `${p.area_mu.toFixed(2)} 亩` : '';
             const areaM2 = p.area_m2 ? `${p.area_m2.toFixed(1)} m²` : '';
             l.bindPopup(`
-              <b>SAM 识别结果</b><br/>
+              <b>Falcon 识别结果</b><br/>
               目标: ${prompt}<br/>
               面积: ${areaM2}${areaMu ? ` (${areaMu})` : ''}
             `);
@@ -354,7 +348,6 @@ const SAMPanel = ({ mapManager }) => {
         setResultLayer(layer);
         setResult(finalData);
 
-        workflow.startDetect(finalData);
         mapManager.map.fitBounds(layer.getBounds().pad(0.1));
         addLog('结果已加载到地图', 'success');
       } else if (nFeatures === 0) {
@@ -375,7 +368,7 @@ const SAMPanel = ({ mapManager }) => {
   const downloadSHP = async () => {
     if (!result) return;
     try {
-      const res = await fetch('/api/sam-download', {
+      const res = await fetch('/api/falcon-download', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ geojson: result }),
@@ -385,7 +378,7 @@ const SAMPanel = ({ mapManager }) => {
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
-      a.download = `sam_result_${new Date().toISOString().slice(0, 19).replace(/[:]/g, '-')}.zip`;
+      a.download = `falcon_result_${new Date().toISOString().slice(0, 19).replace(/[:]/g, '-')}.zip`;
       document.body.appendChild(a);
       a.click();
       document.body.removeChild(a);
@@ -405,7 +398,7 @@ const SAMPanel = ({ mapManager }) => {
     setRequeryRunning(true);
     addLog('▶ Requery 精修启动...');
     try {
-      const res = await fetch('/api/sam-requery', {
+      const res = await fetch('/api/falcon-requery', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -441,7 +434,7 @@ const SAMPanel = ({ mapManager }) => {
               style: { color: '#ef4444', weight: 1.5, dashArray: '6 4', fillColor: '#fca5a5', fillOpacity: 0.15 },
               onEachFeature: (f, l) => {
                 const p = f.properties || {};
-                l.bindPopup(`<b>SAM 粗检测</b><br/>目标: ${prompt}<br/>面积: ${p.area_m2 ? p.area_m2.toFixed(1)+' m²' : ''}`);
+                l.bindPopup(`<b>Falcon 粗检测</b><br/>目标: ${prompt}<br/>面积: ${p.area_m2 ? p.area_m2.toFixed(1)+' m²' : ''}`);
               },
             });
             coarseL.addTo(mapManager.map);
@@ -465,58 +458,20 @@ const SAMPanel = ({ mapManager }) => {
           }),
           onEachFeature: (feature, l) => {
             const p = feature.properties || {};
-            const source = p.source === 'sam_requery' ? ' (精修)' : '';
-            l.bindPopup(`<b>SAM${source}</b><br/>目标: ${prompt}<br/>面积: ${p.area_m2 ? p.area_m2.toFixed(1)+' m²' : ''}`);
+            const source = p.source === 'falcon_requery' ? ' (精修)' : '';
+            l.bindPopup(`<b>Falcon${source}</b><br/>目标: ${prompt}<br/>面积: ${p.area_m2 ? p.area_m2.toFixed(1)+' m²' : ''}`);
           },
         });
         layer.addTo(mapManager.map);
         setResultLayer(layer);
       }
       setResult(refined);
-      workflow.startRequery(refined);
     } catch (err) {
       addLog(`✗ Requery 失败: ${err.message}`, 'error');
     } finally {
       setRequeryRunning(false);
     }
   };
-
-  // 发送当前结果到标注面板
-  const sendToAnnotation = async () => {
-    if (!result?.features?.length) return;
-    const sessionId = `sam_${Date.now()}`;
-    try {
-      const items = result.features.map((f) => ({
-        session_id: sessionId,
-        image_path: '',
-        label: prompt.trim(),
-        class_id: null,
-        geometry: f.geometry,
-        source: f.properties?.source || 'sam_preannotate',
-        confidence: f.properties?.requery_confidence || 0.8,
-      }));
-      const res = await fetch('/api/annotations', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ annotations: items }),
-      });
-      if (!res.ok) throw new Error((await res.text()).slice(0, 200));
-      addLog(`✓ 已发送 ${items.length} 条预标注到标注面板`, 'success');
-
-      // 刷新工作流标注计数
-      workflow.refreshAnnotationCount(sessionId);
-      // 记录 sessionId 以便后续训练
-      if (!_trainSessionIds.includes(sessionId)) {
-        _trainSessionIds.push(sessionId);
-      }
-    } catch (err) {
-      addLog(`✗ 发送失败: ${err.message}`, 'error');
-    }
-  };
-
-  // 累积的训练 session ID 列表（模块级，避免闭包问题）
-  const _trainSessionIdsRef = useRef([]);
-  const _trainSessionIds = _trainSessionIdsRef.current;
 
   // 高亮地图上的单个特征
   const highlightFeatureOnMap = useCallback((feature, idx) => {
@@ -570,7 +525,7 @@ const SAMPanel = ({ mapManager }) => {
           style: { color: '#e53e3e', weight: 2, fillColor: '#fc8181', fillOpacity: 0.4 },
           onEachFeature: (feature, l) => {
             const p = feature.properties || {};
-            l.bindPopup(`<b>SAM</b><br/>目标: ${p.prompt || prompt}<br/>面积: ${p.area_m2 ? p.area_m2.toFixed(1)+' m²' : ''}`);
+            l.bindPopup(`<b>Falcon</b><br/>目标: ${p.prompt || prompt}<br/>面积: ${p.area_m2 ? p.area_m2.toFixed(1)+' m²' : ''}`);
           },
         });
         layer.addTo(mapManager.map);
@@ -579,22 +534,6 @@ const SAMPanel = ({ mapManager }) => {
         setResultLayer(null);
         setResult(null);
       }
-    }
-  };
-
-  // 提交 SSA 训练
-  const handleSubmitTrain = async () => {
-    if (_trainSessionIds.length === 0) {
-      addLog('✗ 无标注 session 可供训练', 'error');
-      return;
-    }
-    addLog('▶ 提交 SSA 训练任务...');
-    const tid = await workflow.submitTrain([..._trainSessionIds], {
-      epochs: 10,
-      checkpointName: `sam_${prompt.trim().slice(0, 20).replace(/\s+/g, '_')}_v1`,
-    });
-    if (tid) {
-      addLog(`✓ 训练任务已提交: ${tid.slice(0, 8)}`, 'success');
     }
   };
 
@@ -632,43 +571,15 @@ const SAMPanel = ({ mapManager }) => {
           }}>×</button>
         </div>
         <div style={{ color: '#64748b', fontSize: 10 }}>
-          SAM / Rule-based progressive tile search
-          <button
-            onClick={() => setWorkflowMode(v => !v)}
-            style={{
-              marginLeft: 8, border: workflowMode ? '1px solid #7c3aed' : '1px solid #e2e8f0',
-              borderRadius: 4, background: workflowMode ? '#f5f3ff' : '#fff',
-              color: workflowMode ? '#7c3aed' : '#94a3b8', cursor: 'pointer',
-              fontSize: 10, padding: '1px 6px', fontWeight: 600, verticalAlign: 'middle',
-            }}
-          >
-            {workflowMode ? '● 工作流' : '○ 工作流'}
-          </button>
+          Falcon / 逐瓦片渐进搜索
         </div>
       </div>
-
-      {/* ── ReSAM 工作流步骤可视化 ── */}
-      {workflowMode && (
-        <div style={{ padding: '0 14px' }}>
-          <WorkflowStepper
-            currentPhase={workflow.phase}
-            completedPhases={
-              new Set(
-                workflow.PHASE_ORDER.slice(0, workflow.phaseIndex)
-              )
-            }
-            onPhaseClick={(phase) => workflow.goToPhase(phase)}
-            iteration={workflow.iteration}
-            annotationCount={workflow.annotationCount}
-          />
-        </div>
-      )}
 
       <div style={{ padding: 14, display: 'grid', gap: 10, gridTemplateRows: 'auto' }}>
         <div>
           <div style={{ color: '#64748b', fontSize: 11, marginBottom: 5, fontWeight: 500 }}>检测目标</div>
           <textarea
-            placeholder="输入任意目标描述，如：建筑、水、桥梁、烟囱、厂房..."
+            placeholder="输入任意目标描述，如：建筑、水体、桥梁、烟囱、厂房..."
             value={prompt}
             onChange={e => setPrompt(e.target.value)}
             rows={2}
@@ -888,7 +799,7 @@ const SAMPanel = ({ mapManager }) => {
             <div style={{ maxHeight: 200, overflowY: 'auto', background: '#f8f7f4', borderRadius: 8, padding: 6, marginBottom: 8, border: '1px solid rgba(180,160,130,0.12)' }}>
               {result.features.map((f, i) => {
                 const p = f.properties || {};
-                const isRefined = p.source === 'sam_requery';
+                const isRefined = p.source === 'falcon_requery';
                 const areaMu = p.area_mu ? `${p.area_mu.toFixed(2)}亩` : '';
                 return (
                   <div key={i} onClick={() => {
@@ -925,22 +836,7 @@ const SAMPanel = ({ mapManager }) => {
             </div>
           )}
 
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 6 }}>
-            <button
-              onClick={sendToAnnotation}
-              disabled={!result?.features?.length}
-              style={{
-                padding: '9px 0', border: 'none', borderRadius: 8,
-                background: result?.features?.length ? 'linear-gradient(135deg, #0ea5e9 0%, #06b6d4 100%)' : '#e2e8f0',
-                color: result?.features?.length ? '#ffffff' : '#94a3b8',
-                cursor: result?.features?.length ? 'pointer' : 'not-allowed',
-                fontWeight: 700, fontSize: 11,
-                boxShadow: result?.features?.length ? '0 2px 8px rgba(14,165,233,0.3)' : 'none',
-                transition: 'all 0.15s',
-              }}
-            >
-              📋 发送标注
-            </button>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6 }}>
             <button
               onClick={downloadSHP}
               disabled={!result}
@@ -974,4 +870,4 @@ const SAMPanel = ({ mapManager }) => {
   );
 };
 
-export default SAMPanel;
+export default FalconPanel;

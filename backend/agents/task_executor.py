@@ -891,6 +891,9 @@ class TaskExecutor:
                 tool_summaries=tool_summaries,
             )
 
+        # 来源标注：回答引用了知识库时，确保末尾带有来源文档名（LLM 忘标则兜底追加）
+        response_text = self._append_kb_sources(response_text, tool_results)
+
         state["response"] = response_text
         logger.info(
             f"[summarize_node] Final state: report_url={state.get('report_url')}, "
@@ -899,6 +902,39 @@ class TaskExecutor:
             f"response_len={len(response_text)}"
         )
         return state
+
+    def _append_kb_sources(self, response_text: str, tool_results: List[Dict]) -> str:
+        """知识库回答的来源标注兜底：提取 KB 结果中的文档名，去重后追加到回复末尾。
+
+        LLM 已在正文中标注（出现任一文档名）则不重复追加；最多列 3 个，超出折叠计数。
+        """
+        titles: List[str] = []
+        for item in tool_results:
+            if item.get("tool_name") != "knowledge_base_tool":
+                continue
+            result = item.get("result", {})
+            if not isinstance(result, dict) or not result.get("success"):
+                continue
+            data = result.get("data")
+            if not isinstance(data, list):
+                continue
+            for chunk in data:
+                if not isinstance(chunk, dict):
+                    continue
+                t = str(chunk.get("title") or "").strip()
+                # 清洗内部文件名：去掉 section_5_0007_ 前缀与 .txt 等扩展名
+                t = re.sub(r"^section_\d+_", "", t)
+                t = re.sub(r"\.(txt|md|docx?|pdf)$", "", t, flags=re.IGNORECASE)
+                if t and t != "未命名文档" and t not in titles:
+                    titles.append(t)
+        if not titles:
+            return response_text
+        if any(t in response_text for t in titles):
+            return response_text
+        shown = "、".join(f"《{t}》" for t in titles[:3])
+        if len(titles) > 3:
+            shown += f" 等 {len(titles)} 篇文档"
+        return f"{response_text}\n\n📎 来源：{shown}"
 
     def _try_extract_rich_response(self, tool_results: List[Dict]) -> Optional[str]:
         """如果工具已产出高质量摘要，返回可直接用作 response 的文本，否则返回 None。"""
@@ -1019,7 +1055,12 @@ class TaskExecutor:
                 "不要仅依据'返回 N 条记录'这一行数描述。聚合查询（如 COUNT）只返回 1 行是正常现象，"
                 "实际统计值在该行的字段中。"
             ),
-            IntentType.KNOWLEDGE_SEARCH: "你是知识库检索助手，请将检索结果整理成清晰易读的回答。",
+            IntentType.KNOWLEDGE_SEARCH: (
+                "你是知识库检索助手，请将检索结果整理成清晰易读的回答。"
+                "回答内容必须基于检索结果，禁止编造。"
+                "关键结论后需用括号标注来源文档名，如（来源：《2023年度罗山县采砂区监测评估意见》）。"
+                "若检索结果不足以回答，如实告知并建议用户换个问法或补充文档。"
+            ),
             IntentType.DATA_VISUALIZATION: "你是数据可视化助手，请简要说明图表内容和数据洞察。",
             IntentType.REPORT_GENERATION: "你是报告生成助手。如果报告已成功生成，请告知用户并说明主要内容。如果因数据不足导致报告未生成，请简洁告知用户原因和建议（如补充数据后重试），不要输出空数据的分析描述。",
             IntentType.WEATHER_QUERY: "你是天气查询助手，请将天气信息整理成简洁易读的格式。",

@@ -24,6 +24,10 @@ backend/sessions.db
 backend/tmp3x643zxw.db
 backend/kuzu_graph
 backend/kuzu_graph_meta.json
+backend/sessions.db-shm
+backend/sessions.db-wal
+*.db-shm
+*.db-wal
 
 # ===== 日志 =====
 *.log

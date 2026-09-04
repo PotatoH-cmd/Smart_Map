@@ -8,8 +8,7 @@ import './App.css';
 import MapComponent from './components/MapComponent';
 import CesiumComponent from './components/CesiumComponent';
 import KnowledgeBaseManager from './components/KnowledgeBaseManager';
-import SAMPanel from './components/SAMPanel';
-import AnnotationPanel from './components/AnnotationPanel';
+import FalconPanel from './components/FalconPanel';
 import TileManager from './components/TileManager';
 import GisPipeline from './components/GisPipeline';
 import RunStatusBar from './components/RunStatusBar';
@@ -543,8 +542,7 @@ function App() {
   const [inputValue, setInputValue] = useState('');
   const [suggestions, setSuggestions] = useState(DEFAULT_SUGGESTIONS);
   const [mapManager, setMapManager] = useState(null);     // 主 2D 地图
-  const [samMapManager, setSamMapManager] = useState(null);     // SAM 模块的地图
-  const [annotateMapManager, setAnnotateMapManager] = useState(null); // 标注模块的地图
+  const [falconMapManager, setFalconMapManager] = useState(null);     // Falcon 识别模块的地图
   const [isPanelCollapsed, setIsPanelCollapsed] = useState(false);
   const [connectionError, setConnectionError] = useState(false);
   const [activeView, setActiveView] = useState('map'); // 'map' | 'cesium' | 'kb'
@@ -1476,17 +1474,11 @@ function App() {
             >
               📚 知识库管理
             </button>
-            <button 
-              className={`nav-button ${activeView === 'sam' ? 'active' : ''}`}
-              onClick={() => setActiveView('sam')}
+            <button
+              className={`nav-button ${activeView === 'falcon' ? 'active' : ''}`}
+              onClick={() => setActiveView('falcon')}
             >
-              🎯 SAM识别
-            </button>
-            <button 
-              className={`nav-button ${activeView === 'annotate' ? 'active' : ''}`}
-              onClick={() => setActiveView('annotate')}
-            >
-              ✏️ 标注
+              🎯 Falcon识别
             </button>
             <button 
               className={`nav-button ${activeView === 'gis' ? 'active' : ''}`}
@@ -1504,7 +1496,7 @@ function App() {
         </div>
       </div>
 
-      <div className={`main-content ${activeView === 'sam' ? 'sam-page-mode' : ''}`}>
+      <div className={`main-content ${activeView === 'falcon' ? 'falcon-page-mode' : ''}`}>
         <div className="view-container">
           {/* 2D 地图 — CSS 显隐，切换不销毁 */}
           <div className="map-wrapper" ref={mapWrapperRef} style={{ display: activeView === 'map' ? 'block' : 'none' }}>
@@ -1535,22 +1527,13 @@ function App() {
           <div style={{ display: activeView === 'kb' ? 'block' : 'none', height: '100%', overflow: 'hidden' }}>
             <KnowledgeBaseManager />
           </div>
-          {/* SAM识别 — CSS 显隐，识别结果不丢失 */}
-          <div className="sam-workspace" style={{ display: activeView === 'sam' ? 'flex' : 'none' }}>
-            <aside className="sam-workspace-sidebar">
-              <SAMPanel mapManager={samMapManager} />
+          {/* Falcon识别 — CSS 显隐，识别结果不丢失 */}
+          <div className="falcon-workspace" style={{ display: activeView === 'falcon' ? 'flex' : 'none' }}>
+            <aside className="falcon-workspace-sidebar">
+              <FalconPanel mapManager={falconMapManager} />
             </aside>
-            <section className="sam-workspace-map">
-              <MapComponent onMapReady={setSamMapManager} onLayerStatus={handleLayerStatus} visible={activeView === 'sam'} />
-            </section>
-          </div>
-          {/* 标注 — CSS 显隐，标注数据不丢失 */}
-          <div className="annotate-workspace" style={{ display: activeView === 'annotate' ? 'flex' : 'none' }}>
-            <aside className="annotate-workspace-sidebar">
-              <AnnotationPanel mapManager={annotateMapManager} />
-            </aside>
-            <section className="annotate-workspace-map">
-              <MapComponent onMapReady={setAnnotateMapManager} onLayerStatus={handleLayerStatus} visible={activeView === 'annotate'} />
+            <section className="falcon-workspace-map">
+              <MapComponent onMapReady={setFalconMapManager} onLayerStatus={handleLayerStatus} visible={activeView === 'falcon'} />
             </section>
           </div>
           {/* 切片管理 — CSS 显隐 */}

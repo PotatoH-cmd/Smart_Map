@@ -4,7 +4,7 @@ import L from 'leaflet';
 /**
  * 共享 Leaflet 绘制 Hook
  * 提供矩形/多边形绘制、清理、GeoJSON 输出等能力
- * 被 SAMPanel 和 AnnotationPanel 共同使用
+ * 被 FalconPanel 使用
  *
  * @param {object} mapManager - 地图管理器 { map, ... }
  * @param {object} [opts] - 可选配置

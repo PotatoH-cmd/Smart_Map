@@ -1,8 +1,14 @@
 """
-SAM 目标识别推理脚本
-通过 map_assistant_v1 前端传入 GeoJSON 区域和提示词，执行 SAM 推理，返回 GeoJSON 结果。
-使用 SegEarth-OV-3 的 SAM3 模型进行文本提示的语义分割。
-支持从本地 GeoTIFF 文件裁剪影像（替代 ArcGIS 服务下载）。
+Falcon 目标识别检测脚本
+通过 map_assistant_v1 前端传入 GeoJSON 区域和自然语言提示词，执行 Falcon-Perception
+（tiiuae/Falcon-Perception，0.6B 早融合多模态 Transformer）推理，返回 GeoJSON 结果。
+
+架构：本脚本负责影像获取（本地 TIF / ArcGIS 缓存瓦片拼接）、瓦片切分与 zoom 放大、
+mask 线性权重融合、多边形提取与地理坐标转换；模型推理通过 HTTP 调用常驻服务
+falcon_service.py（FALCON_SERVICE_URL，默认 http://127.0.0.1:8765）。
+
+Falcon 天然支持自由文本 query：无需词表、无需注册类，中文目标经
+resolve_query()（内置映射 + qwen-flash 翻译兜底）转为英文后直接查询。
 """
 import os
 import sys
@@ -11,10 +17,10 @@ import json
 import time
 import tempfile
 import re
+import base64
 import numpy as np
 from pathlib import Path
 from PIL import Image
-# from io import BytesIO  # 不再需要，直接使用 PIL Image.save(path)
 from shapely.geometry import shape, mapping, Polygon
 from shapely.ops import unary_union
 import rasterio
@@ -22,256 +28,211 @@ from rasterio.windows import from_bounds
 from rasterio.warp import calculate_default_transform, reproject, Resampling
 from rasterio.transform import from_bounds as transform_from_bounds
 
-# 添加 SegEarth-OV-3 到路径
-SEG_DIR = Path(__file__).parent.parent.parent.parent / "seg" / "SegEarth-OV-3-main"
-sys.path.insert(0, str(SEG_DIR))
-
-# 切换工作目录（SAM3 模型使用相对路径加载资源）
-os.chdir(str(SEG_DIR))
-
-
 LOCAL_TIF = "/mnt/arcgisorgdata/2026001_河南省2026年1_2月亚米遥感影像/2023年高分影像.tif"
-SAM_BACKEND = "sam3"  # 统一使用 SAM3 语义分割，不再支持 Ollama/VLM
 
-# 进度追踪：通过环境变量 SAM_PROGRESS_FILE 传递进度文件路径
-PROGRESS_FILE = os.environ.get("SAM_PROGRESS_FILE", "")
+# 常驻 Falcon 推理服务地址（falcon_service.py）
+FALCON_SERVICE_URL = os.environ.get("FALCON_SERVICE_URL", "http://127.0.0.1:8765").rstrip("/")
+FALCON_DETECT_TIMEOUT = int(os.environ.get("FALCON_DETECT_TIMEOUT", "180"))
 
-# ── 模块级模型单例 ──
-# 避免每次推理重复加载 800M 参数的 SAM3 模型
-_MODEL_CACHE = None
-_SSA_ADAPTER = None
-_PRIORITY_CATEGORIES = os.environ.get("SAM_PRIORITY_CATEGORIES", "").strip()
-_BETA_PRIORITY = float(os.environ.get("SAM_BETA_PRIORITY", "2.0"))
+# 进度追踪：通过环境变量 FALCON_PROGRESS_FILE 传递进度文件路径
+PROGRESS_FILE = os.environ.get("FALCON_PROGRESS_FILE", "")
 
 
-def _read_active_checkpoint():
-    """读取当前激活的 SSA checkpoint 路径（backend/data/checkpoints/active.json）。
-    若未配置或文件不存在，则回退到环境变量 SAM3_SSA_CHECKPOINT。"""
+def falcon_service_ready():
+    """检查常驻 Falcon 推理服务是否可达（不阻塞等待模型加载完成）。"""
     try:
-        cfg_path = os.path.join(
-            os.path.dirname(os.path.abspath(__file__)),
-            '..', 'data', 'checkpoints', 'active.json')
-        if os.path.exists(cfg_path):
-            with open(cfg_path, 'r') as f:
-                data = json.load(f)
-            ckpt = data.get('checkpoint', '')
-            if ckpt and os.path.exists(ckpt):
-                return ckpt
+        import requests
+        r = requests.get(f"{FALCON_SERVICE_URL}/health", timeout=5)
+        return r.status_code == 200 and r.json().get("status") != "error"
     except Exception:
-        pass
-    return os.environ.get('SAM3_SSA_CHECKPOINT', '').strip()
+        return False
 
 
-_SSA_CHECKPOINT = _read_active_checkpoint()
+def falcon_detect_image(image, query, task="segmentation"):
+    """调用常驻 Falcon 服务执行单图推理。
 
-
-def get_sam_model():
+    image: PIL.Image 或本机图片绝对路径（服务与本脚本同机部署时优先传路径，
+           省去 base64 编解码开销；跨机场景自动退化为 base64）。
+    返回: (instances, processed_size) — instances 为实例列表
+          [{mask_rle: {counts, size}, bbox_norm: {x,y,h,w}}]，
+          RLE 为模型处理分辨率（16 的倍数、≤1024）。
+    失败抛 RuntimeError，不静默返回空结果。
     """
-    获取或创建 SAM3 模型实例（模块级单例）。
-    首次调用时加载模型，后续调用直接返回缓存实例。
-    
-    环境变量:
-      SAM_PROB_THD: 概率阈值（默认 0.18）
-      SAM_CONF_THD: 置信度阈值（默认 0.12）
-      SAM3_SSA_CHECKPOINT: SSA 微调 checkpoint 路径
-    """
-    global _MODEL_CACHE, _SSA_ADAPTER, _PRIORITY_CATEGORIES, _BETA_PRIORITY
-    if _MODEL_CACHE is None:
-        from segearthov3_segmentor import SegEarthOV3Segmentation
-        _prob_thd = float(os.environ.get("SAM_PROB_THD", "0.18"))
-        _conf_thd = float(os.environ.get("SAM_CONF_THD", "0.12"))
-        print(f"[SAM] 加载模型单例... prob_thd={_prob_thd}, conf_thd={_conf_thd}")
-        _MODEL_CACHE = SegEarthOV3Segmentation(
-            type='SegEarthOV3Segmentation',
-            model_type='SAM3',
-            classname_path=os.path.join(str(SEG_DIR), 'configs', 'my_name.txt'),
-            prob_thd=_prob_thd,
-            confidence_threshold=_conf_thd,
-            slide_stride=1280,
-            slide_crop=1536,
-        )
-        # ── 加载 SSA Adapter（如果配置了 checkpoint） ──
-        # ── 加载 checkpoint（自动区分 ReSAM vs 旧版 SSA） ──
-        if _SSA_CHECKPOINT and os.path.exists(_SSA_CHECKPOINT):
-            try:
-                import torch as _torch
-                checkpoint = _torch.load(_SSA_CHECKPOINT, map_location='cpu')
-                # 从 checkpoint 元数据提取训练类别
-                metadata = checkpoint.get('metadata', {})
-                trained_classes = metadata.get('classes', [])
-                if trained_classes:
-                    existing = set(_PRIORITY_CATEGORIES.split(",")) if _PRIORITY_CATEGORIES else set()
-                    existing.update(c.lower() for c in trained_classes)
-                    _PRIORITY_CATEGORIES = ",".join(existing)
-                    # 使用 SSA checkpoint 时提高 beta
-                    _BETA_PRIORITY = max(_BETA_PRIORITY, float(os.environ.get("SAM_SSA_BETA", "3.0")))
-                    print(f"[SAM] SSA checkpoint 已加载: {_SSA_CHECKPOINT}")
-                    print(f"[SAM]   训练类别: {trained_classes}")
-                    print(f"[SAM]   优先级类别: {_PRIORITY_CATEGORIES}, beta={_BETA_PRIORITY}")
-                else:
-                    print(f"[SAM] SSA checkpoint 加载成功（无类别元数据）: {_SSA_CHECKPOINT}")
-            except Exception as e:
-                print(f"[SAM] checkpoint 加载失败: {e}，使用默认权重")
-        else:
-            print(f"[SAM] checkpoint 路径不存在: {_SSA_CHECKPOINT}，使用默认权重")
+    import requests
+    payload = {"query": query, "task": task}
+    if isinstance(image, str):
+        payload["image_path"] = image
+    else:
+        buf = io.BytesIO()
+        image.save(buf, format="PNG")
+        payload["image_b64"] = base64.b64encode(buf.getvalue()).decode()
 
-    # ── 半精度加载：与 vLLM 共卡时显存吃紧（每卡仅剩 ~4.5G），默认 bf16 减半权重占用 ──
-    # 环境变量 SAM_DTYPE=float32 可回退原生精度
-    _dtype = os.environ.get("SAM_DTYPE", "bfloat16").strip().lower()
-    if _dtype not in ("", "fp32", "float32"):
+    last_err = None
+    for attempt in (1, 2):  # 失败重试 1 次
         try:
-            import torch as _t
-            _target = _t.bfloat16 if _dtype in ("bf16", "bfloat16") else getattr(_t, _dtype)
-            _inner = getattr(getattr(_MODEL_CACHE, "processor", None), "model", None)
-            if _inner is not None:
-                # 仅转换浮点参数/缓冲；复数张量（位置编码等）转换会丢弃虚部、破坏模型
-                _n = 0
-                for _mod in [_inner]:
-                    for _p in list(_mod.parameters()) + list(_mod.buffers()):
-                        if _p.is_floating_point() and not _p.is_complex():
-                            _p.data = _p.data.to(_target)
-                            _n += 1
-                print(f"[SAM] 模型权重已转为 {_dtype}（{_n} 个张量，显存减半，共卡友好）")
+            r = requests.post(f"{FALCON_SERVICE_URL}/detect", json=payload,
+                              timeout=FALCON_DETECT_TIMEOUT)
+            if r.status_code != 200:
+                raise RuntimeError(f"Falcon 服务返回 {r.status_code}: {r.text[:200]}")
+            data = r.json()
+            return data.get("instances", []), data.get("processed_size")
         except Exception as e:
-            print(f"[SAM] 半精度转换失败（保持 fp32）: {e}")
-
-    # 有提前注册的动态类则热更新进模型
-    if _EXTRA_CLASS_WORDS:
-        _patch_model_classes(_MODEL_CACHE)
-
-    return _MODEL_CACHE
+            last_err = e
+            if attempt == 1:
+                print(f"[FALCON] 服务调用失败（将重试 1 次）: {e}")
+                time.sleep(1.0)
+    raise RuntimeError(f"Falcon 服务调用失败: {last_err}")
 
 
-def get_ssa_adapter_info():
-    """返回当前 SSA Adapter 状态信息"""
-    return {
-        "checkpoint": _SSA_CHECKPOINT or None,
-        "loaded": _SSA_CHECKPOINT and os.path.exists(_SSA_CHECKPOINT),
-        "priority_categories": _PRIORITY_CATEGORIES,
-        "beta_priority": _BETA_PRIORITY,
-    }
+def falcon_instances_to_mask(instances, out_h, out_w):
+    """将 /detect 返回的实例 RLE 解码、缩放到目标尺寸并 union 成二值 mask。
 
-
-def apply_beta_priority(mask, seg_pred_full, prompt, all_indices):
+    RLE 的 size 是模型处理分辨率，与本脚本的瓦片/裁剪尺寸不一致，
+    用 NEAREST 缩放保持二值边界。
     """
-    对优先级类别应用 beta 加权，提高用户关注类别的召回率。
-    
-    公式: score_{priority} *= beta_priority
-    
-    当 SAM_PRIORITY_CATEGORIES 环境变量包含 prompt 对应类别时，
-    将该类别的 logits/置信度乘以 beta_priority 系数。
-    这不会影响 mask 的二进制结果（mask 由阈值决定），
-    但结合低阈值策略可以提高候选 pixel 数。
-    """
-    if not _PRIORITY_CATEGORIES:
-        return mask  # 无优先级类别，直接返回
+    import cv2
+    from pycocotools import mask as mask_utils
 
-    priority_set = {c.strip().lower() for c in _PRIORITY_CATEGORIES.split(",") if c.strip()}
-    prompt_lower = prompt.lower()
-
-    # 检查 prompt 是否命中优先级类别
-    is_priority = any(
-        pc in prompt_lower or prompt_lower in pc
-        for pc in priority_set
-    )
-    if not is_priority:
-        return mask
-
-    # 已有优先级：尝试放宽阈值（降低 _SAM_PROB_THD 临时值）
-    # 这是一种启发式方法：对于优先级类别，用更低的阈值重跑
-    # 注意：这里仅对已有的 mask 不做改动，因为 prob_thd 在模型加载时已固定
-    # 真正的 SSA 微调会从根本上解决这个问题
-    log_prefix = f"[PRIORITY] prompt={prompt} 命中优先级类别，已标记"
-    print(f"{log_prefix}（当前 beta={_BETA_PRIORITY}，精确加权需 SSA 微调）")
+    mask = np.zeros((out_h, out_w), dtype=np.uint8)
+    for inst in instances:
+        rle = inst.get("mask_rle") if isinstance(inst, dict) else None
+        if not rle or not rle.get("size"):
+            continue
+        counts = rle.get("counts")
+        if isinstance(counts, str):
+            counts = counts.encode("utf-8")
+        try:
+            m = mask_utils.decode({"counts": counts, "size": rle["size"]})
+        except Exception as e:
+            print(f"[FALCON] RLE 解码失败（跳过该实例）: {e}")
+            continue
+        if m.shape != (out_h, out_w):
+            m = cv2.resize(m, (out_w, out_h), interpolation=cv2.INTER_NEAREST)
+        mask |= (m > 0).astype(np.uint8)
     return mask
 
 
-CLASS_ALIASES = [
-    ("background",),
-    ("bareland", "barren", "裸地", "裸土", "荒地"),
-    ("grass", "草", "草地"),
-    ("road", "道路", "公路", "马路", "路"),
-    ("car", "车辆", "汽车", "小车", "车"),
-    ("tree", "forest", "树", "树木", "树林", "森林"),
-    ("water", "river", "水", "水体", "河流", "河道"),
-    ("cropland", "农田", "耕地", "田地", "耕作区"),
-    ("building", "roof", "house", "建筑", "建筑物", "房子", "房屋", "屋顶", "厂房", "仓库", "楼"),
-]
+# ── 查询词解析：Falcon 天然自由文本，中文目标统一转英文（英文 query 精度最佳） ──
+QUERY_MAP = {
+    "水体": "water body", "水": "water", "河流": "river", "河道": "river channel",
+    "湖泊": "lake", "坑塘": "pond", "池塘": "pond",
+    "建筑": "building", "建筑物": "building", "房子": "house", "房屋": "house",
+    "屋顶": "rooftop", "厂房": "factory building", "仓库": "warehouse",
+    "蓝顶厂房": "blue roof", "蓝色屋顶": "blue roof", "蓝屋顶": "blue roof",
+    "彩钢瓦厂房": "factory building", "钢结构厂房": "factory building",
+    "工业建筑": "industrial building", "车间": "industrial building", "工业园": "industrial park",
+    "道路": "road", "公路": "highway", "马路": "road", "路": "road",
+    "车辆": "vehicle", "汽车": "car", "车": "vehicle",
+    "树木": "tree", "树": "tree", "森林": "forest", "林地": "forest",
+    "草地": "grassland", "植被": "vegetation",
+    "耕地": "cropland", "农田": "farmland", "田地": "farmland",
+    "裸地": "bareland", "裸土": "bare soil", "荒地": "barren land",
+    "桥梁": "bridge", "烟囱": "chimney", "大棚": "greenhouse",
+    "采砂船": "sand dredging vessel", "挖砂船": "sand dredging vessel",
+    "砂场": "sand yard", "采砂场": "sand mining site",
+    "堆砂": "sand pile", "砂堆": "sand pile",
+}
 
-# 动态扩展类：词表之外的自由文本词，注册后追加到模型 query_words 末尾，
-# 走与 9 类完全相同的瓦片推理路径（类嵌入是运行时文本编码，无需重训）
-_EXTRA_CLASS_WORDS = []   # [(词)]，类号 = len(CLASS_ALIASES) + 位置
+_query_cache = {}
 
 
-def resolve_target_indices(text_prompt, default_indices=None):
-    """解析检测目标 -> 类号列表。
+def _translate_via_qwen(text):
+    """qwen-flash 兜底：中文检测目标 → 面向开放词汇分割模型的英文 query。
 
-    语义（精确优先，支持任意自定义概念）：
-      1) 与内置 9 类别名精确相等 -> 内置类
-      2) 与已注册动态类精确相等   -> 动态类
-      3) 其余非空自由文本        -> 整体注册为新动态类（泛化性：任意词皆可检测）
-    旧版子串匹配已弃用：'植被水体' 会误命中 '水'，导致自定义概念永远到不了注册分支。
+    返回候选列表 [主候选, 备选1, 备选2]，主候选失效时可自动降级重试。
     """
-    prompt = (text_prompt or "").strip()
-    if not prompt:
-        return list(default_indices) if default_indices else []
+    import dashscope
+    resp = dashscope.Generation.call(
+        model=os.environ.get("FALCON_TRANSLATE_MODEL", "qwen-flash"),
+        api_key=os.environ.get("DASHSCOPE_API_KEY"),
+        messages=[{"role": "user",
+                   "content": "你是遥感目标检测助手。开放词汇分割模型接受简洁的英文名词短语作为查询。\n"
+                              f"将检测目标「{text}」转换为英文查询短语，输出 3 个候选，用分号分隔：\n"
+                              "- 第 1 个是最优表达，后面 2 个是同义或更通用的类别词\n"
+                              "- 使用常见英文类别词（building/factory/roof/water/road/tree 等），可带颜色、材质属性修饰\n"
+                              "- 每个短语不超过 4 个单词；只输出短语本身，不要解释、编号和标点（分号除外）\n"
+                              "示例：\n蓝顶厂房 → blue-roofed building; blue roof; factory building\n"
+                              "水体 → water body; water surface; river\n"
+                              "大棚 → plastic greenhouse; agricultural greenhouse; greenhouse"}],
+        result_format="message",
+    )
+    if resp.status_code == 200:
+        out = resp.output.choices[0].message.content.strip()
+        parts = [re.sub(r"[^A-Za-z ]", "", p).strip().lower()
+                 for p in re.split(r"[;；、\n]", out)]
+        seen, candidates = set(), []
+        for p in parts:
+            if p and p not in seen:
+                seen.add(p)
+                candidates.append(p)
+        if candidates:
+            return candidates[:3]
+    raise RuntimeError(f"qwen-flash 翻译失败: {getattr(resp, 'message', resp)}")
 
-    pl = prompt.lower()
-    # 1) 精确命中内置别名
-    for idx, aliases in enumerate(CLASS_ALIASES):
-        if any(pl == alias.lower() for alias in aliases):
-            return [idx]
-    # 2) 精确命中已注册动态类
-    for j, word in enumerate(_EXTRA_CLASS_WORDS):
-        if pl == word.lower():
-            return [len(CLASS_ALIASES) + j]
-    # 3) 自由文本 -> 注册为新类
-    if register_extra_class(prompt):
-        return [len(CLASS_ALIASES) + _EXTRA_CLASS_WORDS.index(prompt)]
-    return list(default_indices) if default_indices else []
+
+# 映射命中时的同义备选（主 query 0 结果时自动降级重试，均为实测有效表达）
+GENERAL_FALLBACKS = {
+    "blue roof": ["factory building", "building"],
+    "factory building": ["industrial building", "building"],
+    "industrial building": ["factory building", "building"],
+    "water body": ["water", "river"],
+    "building": ["house", "industrial building"],
+    "vehicle": ["car", "truck"],
+}
 
 
-def _patch_model_classes(model):
-    """把动态注册的自定义类追加进模型的 query_words/query_idx/通道数。"""
-    import torch as _torch
+def resolve_query_variants(prompt):
+    """检测目标 → (主英文 query, 备选列表)。
+
+    1) 已是英文 → 原样使用（无备选）
+    2) 精确命中内置映射 → 直接返回，附同义备选
+    3) 其余 → qwen-flash 生成 3 候选，失败原样透传（Falcon 对部分中文也有泛化）
+    """
+    q = (prompt or "").strip()
+    if not q or re.fullmatch(r"[A-Za-z0-9 ,\-_/']+", q):
+        return q, []
+    if q in _query_cache:
+        return _query_cache[q]
+    if q in QUERY_MAP:
+        primary = QUERY_MAP[q]
+        variants = (primary, list(GENERAL_FALLBACKS.get(primary, [])))
+        _query_cache[q] = variants
+        return variants
     try:
-        qw = list(model.query_words)
-        qi = list(model.query_idx)
-        qi = [int(x) for x in qi]
-        existing = set(str(w).lower() for w in qw)
-        changed = False
-        for j, word in enumerate(_EXTRA_CLASS_WORDS):
-            if word.lower() not in existing:
-                qw.append(word)
-                qi.append(len(CLASS_ALIASES) + j)
-                changed = True
-        if not changed:
-            return
-        model.query_words = qw
-        model.query_idx = _torch.tensor(qi, dtype=_torch.int64, device=model.device)
-        model.num_queries = len(qw)
-        model.num_cls = max(qi) + 1
-        print(f"[SAM] 动态扩类 -> 共 {model.num_cls} 类, query 数 {model.num_queries}: {qw[-len(_EXTRA_CLASS_WORDS):]}")
+        cands = _translate_via_qwen(q)
+        print(f"[FALCON] 查询生成: 「{q}」→ 主 '{cands[0]}'，备选 {cands[1:]}")
+        variants = (cands[0], cands[1:])
+        _query_cache[q] = variants
+        return variants
     except Exception as e:
-        print(f"[SAM] 动态扩类失败（退回内置词表）: {e}")
+        print(f"[FALCON] 查询生成失败（原样透传）: {e}")
+        return q, []
 
 
-def register_extra_class(word):
-    """注册自定义检测类。若模型已加载，立即热更新其类别集合。"""
-    word = (word or "").strip()
-    if not word:
-        return False
-    # 已被内置词表覆盖则不重复注册（精确比较，避免与 resolve 互相递归）
-    wl = word.lower()
-    for aliases in CLASS_ALIASES:
-        if any(wl == a.lower() for a in aliases):
-            return True
-    if word not in _EXTRA_CLASS_WORDS:
-        _EXTRA_CLASS_WORDS.append(word)
-        print(f"[SAM] 注册自定义检测类: 「{word}」(类号 {len(CLASS_ALIASES) + _EXTRA_CLASS_WORDS.index(word)})")
-    if _MODEL_CACHE is not None:
-        _patch_model_classes(_MODEL_CACHE)
-    return True
+def resolve_query(prompt):
+    """兼容接口：仅返回主英文 query。"""
+    return resolve_query_variants(prompt)[0]
+
+
+def falcon_detect_with_fallback(image, variants, task="segmentation", log_prefix="[FALCON]"):
+    """按候选顺序推理，返回首个非空实例结果；全部为空则返回最后候选的（空）结果。
+
+    variants: (primary_query, [fallback_queries]) 或单个 query 字符串。
+    Falcon 单帧推理仅 ~2.5s，备选重试的额外成本可控。
+    """
+    primary, fallbacks = variants if isinstance(variants, tuple) else (variants, [])
+    candidates = [primary] + [f for f in fallbacks if f and f != primary]
+    last = ([], None)
+    for i, q in enumerate(candidates):
+        instances, size = falcon_detect_image(image, q, task=task)
+        if instances:
+            if i > 0:
+                print(f"{log_prefix} 备选 query 生效: '{q}' → {len(instances)} 实例")
+            return instances, size
+        last = (instances, size)
+        if i < len(candidates) - 1:
+            print(f"{log_prefix} query '{q}' 0 实例，尝试备选 '{candidates[i + 1]}'")
+    return last
 
 
 
@@ -303,7 +264,7 @@ def crop_image_from_local_tif(bounds, output_path, target_size=1024, fast_mode=F
 
     with rasterio.open(LOCAL_TIF) as src:
         src_crs = src.crs
-        print(f"[SAM] 本地 TIF: CRS={src_crs}, Size={src.width}x{src.height}, Bands={src.count}")
+        print(f"[FALCON] 本地 TIF: CRS={src_crs}, Size={src.width}x{src.height}, Bands={src.count}")
 
         # 如果 TIF 不是 EPSG:4326，需要将请求的 bounds 转换到 TIF 坐标系
         if src_crs and str(src_crs) != 'EPSG:4326':
@@ -321,7 +282,7 @@ def crop_image_from_local_tif(bounds, output_path, target_size=1024, fast_mode=F
         if window.width < 1 or window.height < 1:
             raise ValueError(f"绘制区域超出影像范围。影像范围: {src.bounds}")
 
-        print(f"[SAM] 裁剪窗口: col={window.col_off:.0f}, row={window.row_off:.0f}, "
+        print(f"[FALCON] 裁剪窗口: col={window.col_off:.0f}, row={window.row_off:.0f}, "
               f"w={window.width:.0f}, h={window.height:.0f}")
 
         band_count = src.count
@@ -373,7 +334,7 @@ def crop_image_from_local_tif(bounds, output_path, target_size=1024, fast_mode=F
 
     # target_size=None: 高分辨率模式（保留原分辨率用于瓦片分割）
     if target_size is None:
-        print(f"[SAM] 高分辨率模式: {orig_w}x{orig_h} (原始分辨率)")
+        print(f"[FALCON] 高分辨率模式: {orig_w}x{orig_h} (原始分辨率)")
     else:
         scale = min(target_size / orig_w, target_size / orig_h)
         new_w, new_h = int(orig_w * scale), int(orig_h * scale)
@@ -383,25 +344,28 @@ def crop_image_from_local_tif(bounds, output_path, target_size=1024, fast_mode=F
         resize_filter = Image.BILINEAR if fast_mode else Image.LANCZOS
         img = img.resize((new_w, new_h), resize_filter)
         filter_name = 'BILINEAR' if fast_mode else 'LANCZOS'
-        print(f"[SAM] 缩放模式: {orig_w}x{orig_h} -> {new_w}x{new_h} (filter={filter_name})")
+        print(f"[FALCON] 缩放模式: {orig_w}x{orig_h} -> {new_w}x{new_h} (filter={filter_name})")
 
     img.save(output_path)
-    print(f"[SAM] 裁剪影像已保存: {output_path} ({img.size[0]}x{img.size[1]})")
-    print(f"[SAM] 实际地理范围(4326): {actual_bounds_4326}")
+    print(f"[FALCON] 裁剪影像已保存: {output_path} ({img.size[0]}x{img.size[1]})")
+    print(f"[FALCON] 实际地理范围(4326): {actual_bounds_4326}")
     return output_path, actual_bounds_4326
 
 
 # ArcGIS 缓存影像服务（与前端底图同源，保证所见即所得）
 ARCGIS_TILE_BASE = os.environ.get(
-    "SAM_IMAGERY_SERVICE",
-    "http://123.149.20.94:60805/arcgis/rest/services/%E9%AB%98%E5%88%86%E5%BD%B1%E5%83%8F/GF_202308_cache/MapServer/tile",
+    "FALCON_IMAGERY_SERVICE",
+    os.environ.get(
+        "SAM_IMAGERY_SERVICE",
+        "http://123.149.20.94:60805/arcgis/rest/services/%E9%AB%98%E5%88%86%E5%BD%B1%E5%83%8F/GF_202308_cache/MapServer/tile",
+    ),
 )
 
 
 def crop_image_from_arcgis_tiles(bounds, output_path, target_size=None, fast_mode=False):
     """
     兜底影像源：从 ArcGIS 缓存服务下载 Web-Mercator 瓦片并拼接为 RGB PNG。
-    本地 TIF 缺失时使用，保证 SAM 看到的影像与前端底图一致。
+    本地 TIF 缺失时使用，保证 Falcon 看到的影像与前端底图一致。
     bounds: (minx, miny, maxx, maxy) in EPSG:4326
     返回: (output_path, actual_bounds_4326) —— actual_bounds 即请求 bounds（像素级精确裁剪）
     """
@@ -424,7 +388,7 @@ def crop_image_from_arcgis_tiles(bounds, output_path, target_size=None, fast_mod
     # 选层级：目标宽度 ≥2048px 的最低层级（上限 z19），服务缺失瓦片时向下降级
     z_pref = math.ceil(math.log2(max(2048.0 * 360.0 / (256.0 * dlon), 1.0)))
     z_pref = max(15, min(z_pref, 19))
-    print(f"[SAM][ArcGIS] 目标层级: z{z_pref} (范围 {dlon:.4f}°)")
+    print(f"[FALCON][ArcGIS] 目标层级: z{z_pref} (范围 {dlon:.4f}°)")
 
     last_err = None
     for z in range(z_pref, 14, -1):
@@ -443,7 +407,7 @@ def crop_image_from_arcgis_tiles(bounds, output_path, target_size=None, fast_mod
             url = f"{ARCGIS_TILE_BASE}/{z}/{r}/{c}"
             for _ in range(3):
                 try:
-                    req = urllib.request.Request(url, headers={"User-Agent": "SAM/1.0"})
+                    req = urllib.request.Request(url, headers={"User-Agent": "FalconDetect/1.0"})
                     with urllib.request.urlopen(req, timeout=10) as resp:
                         data = resp.read()
                     if resp.status == 200 and len(data) > 100:
@@ -458,7 +422,7 @@ def crop_image_from_arcgis_tiles(bounds, output_path, target_size=None, fast_mod
             for cr, data in pool.map(fetch_bytes, tiles):
                 results[cr] = data
         missing = sum(1 for v in results.values() if v is None)
-        print(f"[SAM][ArcGIS] z{z}: 下载 {len(tiles)} 瓦片, 缺失 {missing}")
+        print(f"[FALCON][ArcGIS] z{z}: 下载 {len(tiles)} 瓦片, 缺失 {missing}")
         if len(tiles) and missing / len(tiles) > 0.3:
             last_err = f"z{z} 缺失率 {missing}/{len(tiles)}"
             continue  # 降级到更低层级
@@ -484,141 +448,36 @@ def crop_image_from_arcgis_tiles(bounds, output_path, target_size=None, fast_mod
             scale = min(target_size / img.width, target_size / img.height)
             img = img.resize((max(int(img.width * scale), 1), max(int(img.height * scale), 1)),
                              Image.BILINEAR if fast_mode else Image.LANCZOS)
-            print(f"[SAM][ArcGIS] 缩放: -> {img.size[0]}x{img.size[1]}")
+            print(f"[FALCON][ArcGIS] 缩放: -> {img.size[0]}x{img.size[1]}")
 
         img.save(output_path)
         actual_bounds = (minx, miny, maxx, maxy)
-        print(f"[SAM][ArcGIS] 在线影像已保存: {output_path} ({img.size[0]}x{img.size[1]}), bounds={actual_bounds}")
+        print(f"[FALCON][ArcGIS] 在线影像已保存: {output_path} ({img.size[0]}x{img.size[1]}), bounds={actual_bounds}")
         return output_path, actual_bounds
 
     raise ValueError(f"ArcGIS 影像下载失败（{last_err}），区域可能无影像覆盖: {bounds}")
 
 
-def run_sam_inference(image_path, text_prompt, output_dir):
+def run_falcon_inference(image_path, text_prompt, output_dir):
     """
-    使用 SegEarthOV3 模型执行文本提示分割。
-    
-    双路径策略：
-    - 若提示词匹配 CLASS_ALIASES（9 类预训练类别），走快速分类路径
-    - 若提示词不匹配（用户自定义概念），走 SAM3 直接文本查询路径
-    返回: 分割结果 numpy array (H, W)
+    Falcon 单帧推理（整图一次查询，适用于小图/demo 模式）。
+
+    将影像与解析后的英文 query 送到常驻 Falcon 服务，解码返回的实例 RLE，
+    union 成与原图等大的二值 mask。
+    返回: (mask, (H, W)) — 二值 uint8 mask 与其形状
     """
-    import torch
-    from torchvision import transforms
-    from mmengine.structures import BaseDataElement, PixelData
-
-    class SegDataSample(BaseDataElement):
-        pass
-
-    target_indices = resolve_target_indices(text_prompt)
-
-    # ── 自定义提示词路径：SAM3 直接文本查询 ──
-    if not target_indices:
-        # 词表外自由文本 → 动态注册为新类，走同样的单帧推理路径
-        print(f"[SAM] 提示词 '{text_prompt}' 不在 9 类预训练类别中，动态注册后单帧推理")
-        register_extra_class(text_prompt)
-        target_indices = resolve_target_indices(text_prompt)
-    if not target_indices:
-        return run_custom_prompt_inference(image_path, text_prompt, output_dir)
-
-    # ── 预训练类别路径：9 类快速分类 ──
-    model = get_sam_model()  # 复用模块级单例
-
-    img = Image.open(image_path).convert('RGB')
-    img_tensor = transforms.Compose([transforms.ToTensor()])(img).unsqueeze(0).to(
-        'cuda' if torch.cuda.is_available() else 'cpu'
-    )
-    
-    data_sample = SegDataSample()
-    data_sample.set_metainfo({
-        'img_path': image_path,
-        'ori_shape': img.size[::-1],
-    })
-    
-    seg_result = model.predict(img_tensor, data_samples=[data_sample])
-    seg_pred = seg_result[0].pred_sem_seg.data.cpu().numpy().squeeze(0)
-    
-    mask = np.zeros_like(seg_pred, dtype=np.uint8)
-    for idx in target_indices:
-        mask |= (seg_pred == idx).astype(np.uint8)
-    
-    # 应用 beta 优先级加权
-    mask = apply_beta_priority(mask, None, text_prompt, target_indices)
-    
-    return mask, seg_pred.shape
-
-
-def run_custom_prompt_inference(image_path, text_prompt, output_dir):
-    """
-    直接使用 SAM3 的文本提示能力查询任意用户输入的概念。
-    不同于 9 类分类流水线（只返回预定义类别的像素），
-    此函数将用户的原始文本直接发送给 SAM3，返回该查询的二值掩膜。
-    
-    适用场景：用户输入不在 9 类 CLASS_ALIASES 中的任意概念
-              如"桥梁""烟囱""大棚""矿坑""采砂船"等
-    """
-    import torch
-    import torch.nn.functional as F
-    from PIL import Image
-
-    model = get_sam_model()
     img = Image.open(image_path).convert('RGB')
     w, h = img.size
-    device = model.device
 
-    print(f"[SAM-Custom] 直接文本查询: '{text_prompt}' (image {w}x{h})")
+    variants = resolve_query_variants(text_prompt)
+    print(f"[FALCON] 单帧推理: query='{variants[0]}' (image {w}x{h})")
 
-    with torch.no_grad(), torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-        # 设置图像，用用户原始文本查询（autocast 使输入与 bf16 权重匹配，对齐官方 segmentor）
-        inference_state = model.processor.set_image(img)
-        inference_state = model.processor.set_text_prompt(
-            state=inference_state, prompt=text_prompt
-        )
+    instances, _ = falcon_detect_with_fallback(image_path, variants, task="segmentation")
+    mask = falcon_instances_to_mask(instances, h, w)
 
-        # 聚合语义头 + 实例头的结果
-        combined = torch.zeros((h, w), device=device)
-        has_any = False
-
-        # ── 语义头（Semantic Head）：全局覆盖 ──
-        sem = inference_state.get('semantic_mask_logits')
-        if sem is not None:
-            if sem.dim() > 2:
-                sem = sem.squeeze()
-            if sem.shape[-2:] != (h, w):
-                sem = F.interpolate(
-                    sem.view(1, 1, *sem.shape[-2:]),
-                    size=(h, w), mode='bilinear', align_corners=False
-                ).squeeze()
-            combined = torch.max(combined, sem.float())
-            has_any = True
-
-        # ── 实例头（Instance Head）：精细边缘 ──
-        inst = inference_state.get('masks_logits')
-        if inst is not None and hasattr(inst, 'shape') and inst.shape[0] > 0:
-            scores = inference_state.get('object_score')
-            for i in range(inst.shape[0]):
-                m = inst[i].squeeze()
-                if m.shape[-2:] != (h, w):
-                    m = F.interpolate(
-                        m.view(1, 1, *m.shape[-2:]),
-                        size=(h, w), mode='bilinear', align_corners=False
-                    ).squeeze()
-                s = scores[i] if scores is not None and i < len(scores) else 1.0
-                combined = torch.max(combined, (m * s).float())
-            has_any = True
-
-        if not has_any:
-            print(f"[SAM-Custom] 无有效输出，返回空掩膜")
-            return np.zeros((h, w), dtype=np.uint8), (h, w)
-        # Sigmoid → 概率 → 阈值二值化
-        prob = combined.sigmoid().cpu().numpy()
-        prob = combined.cpu().numpy()
-        mask = (prob > model.prob_thd).astype(np.uint8)
-
-        mask_ratio = mask.sum() / mask.size if mask.size > 0 else 0
-        print(f"[SAM-Custom] '{text_prompt}': {mask.sum()}px "
-              f"({mask_ratio*100:.1f}%) thd={model.prob_thd}")
-
+    mask_ratio = mask.sum() / mask.size if mask.size > 0 else 0
+    print(f"[FALCON] 单帧结果: {len(instances)} 个实例, {mask.sum()}px "
+          f"({mask_ratio*100:.1f}%)")
     return mask, (h, w)
 
 
@@ -627,51 +486,40 @@ def run_tile_based_inference(image_path, text_prompt, output_dir,
     """
     瓦片分割 + 放大推理策略：
     1. 将高分辨率图像切成重叠的小瓦片
-    2. 每个瓦片放大 zoom_factor 倍后进行 SAM 推理
+    2. 每个瓦片放大 zoom_factor 倍后送 Falcon 常驻服务推理
     3. 将所有瓦片的预测 mask 拼接回原始尺寸
-    
+
     参数：
       tile_size: 瓦片像素大小（默认 512）
       zoom_factor: 放大倍数（默认 3x，放大后小目标更清晰可检测）
       overlap: 瓦片间重叠像素数（避免边缘伪影）
-    
+
     返回: (merged_mask, (H, W)) — 与原图等大的二值 mask
     """
-    import torch
-    from torchvision import transforms
-    from mmengine.structures import BaseDataElement, PixelData
     import cv2
 
-    class SegDataSample(BaseDataElement):
-        pass
-
-    target_indices = resolve_target_indices(text_prompt)
-
-    # ── 自定义提示词路径：退回单次直接查询 ──
-    if not target_indices:
-        # 词表外自由文本 → 动态注册为新类，走同样的瓦片推理路径（泛化性扩展）
-        print(f"[SAM-Tile] 提示词 '{text_prompt}' 不在 9 类中，动态注册后走瓦片推理")
-        register_extra_class(text_prompt)
-        target_indices = resolve_target_indices(text_prompt)
-    if not target_indices:
-        return run_custom_prompt_inference(image_path, text_prompt, output_dir)
-
-    # 加载模型（复用模块级单例）
-    print(f"[SAM-Tile] 获取模型单例...")
-    model = get_sam_model()
-
-    # 打开原图
     full_img = Image.open(image_path).convert('RGB')
     full_W, full_H = full_img.size
-    print(f"[SAM-Tile] 原图尺寸: {full_W}x{full_H}")
-    print(f"[SAM-Tile] 瓦片参数: size={tile_size}, zoom={zoom_factor}x, overlap={overlap}")
+    print(f"[FALCON-Tile] 原图尺寸: {full_W}x{full_H}")
+    print(f"[FALCON-Tile] 瓦片参数: size={tile_size}, zoom={zoom_factor}x, overlap={overlap}")
+
+    # 解析检测目标（内置映射 + qwen-flash 查询生成 + 备选自动重试）
+    query_variants = resolve_query_variants(text_prompt)
+    print(f"[FALCON-Tile] 检测目标: '{text_prompt}' → query='{query_variants[0]}'"
+          + (f"，备选 {query_variants[1]}" if query_variants[1] else ""))
+
+    # 服务预检：不可达立即报错，避免逐瓦片重试浪费时间
+    if not falcon_service_ready():
+        raise RuntimeError(
+            f"Falcon 推理服务不可达: {FALCON_SERVICE_URL}。"
+            f"请先启动服务（pm2 start falcon-service 或 python backend/tools/falcon_service.py）")
 
     # 计算瓦片网格（带步长和重叠）
     stride = tile_size - overlap
     n_cols = (full_W - overlap) // stride + 1
     n_rows = (full_H - overlap) // stride + 1
     total_tiles = n_cols * n_rows
-    print(f"[SAM-Tile] 网格: {n_rows}行 x {n_cols}列 = {total_tiles} 个瓦片")
+    print(f"[FALCON-Tile] 网格: {n_rows}行 x {n_cols}列 = {total_tiles} 个瓦片")
 
     # 输出累加器（float 用于加权融合）和计数器
     accumulator = np.zeros((full_H, full_W), dtype=np.float64)
@@ -694,73 +542,16 @@ def run_tile_based_inference(image_path, text_prompt, output_dir,
             zoomed_h = min(th * zoom_factor, 4096)
             zoomed_tile = tile.resize((zoomed_w, zoomed_h), Image.LANCZOS)
 
-            # 保存瓦片到内存盘（/dev/shm），避免磁盘 I/O
-            shm_dir = os.path.join('/dev/shm', f'sam_tile_{os.getpid()}')
-            os.makedirs(shm_dir, exist_ok=True)
-            tile_tmp_path = os.path.join(shm_dir, f'tile_{row}_{col}.png')
-            zoomed_tile.save(tile_tmp_path)
-
-            # 推理
-            ds = SegDataSample()
-            ds.set_metainfo({
-                'img_path': tile_tmp_path,
-                'ori_shape': (zoomed_h, zoomed_w),
-            })
-            result = model.predict(None, data_samples=[ds])
-
-            # 提取目标类别的 mask
-            _n_base = len(CLASS_ALIASES)
-            if any(idx >= _n_base for idx in target_indices):
-                # 动态自定义类：processor 直连提取。
-                # 不走 model.predict —— 其 presence 门控对新概念校准极差（实测把
-                # 0.9995 的语义响应乘成 0.01），argmax 竞争也必输给 SSA 微调类。
-                import torch as _torch
-                _F = _torch.nn.functional
-                _dyn_thd = float(os.environ.get("SAM_DYN_THD", "0.45"))
-                tile_mask = np.zeros((zoomed_h, zoomed_w), dtype=np.float64)
-                with _torch.no_grad(), _torch.autocast(device_type="cuda", dtype=_torch.bfloat16):
-                    state = model.processor.set_image(zoomed_tile)
-                    for idx in target_indices:
-                        if idx < _n_base:
-                            continue
-                        word = _EXTRA_CLASS_WORDS[idx - _n_base]
-                        model.processor.reset_all_prompts(state)
-                        st = model.processor.set_text_prompt(state=state, prompt=word)
-                        resp = _torch.zeros((zoomed_h, zoomed_w), device=model.device)
-                        sem = st.get('semantic_mask_logits')
-                        if sem is not None:
-                            sem = sem.squeeze()
-                            if sem.shape[-2:] != (zoomed_h, zoomed_w):
-                                sem = _F.interpolate(
-                                    sem.view(1, 1, *sem.shape[-2:]),
-                                    size=(zoomed_h, zoomed_w), mode='bilinear',
-                                    align_corners=False).squeeze()
-                            resp = _torch.max(resp, sem.float())
-                        inst = st.get('masks_logits')
-                        if inst is not None and inst.shape[0] > 0:
-                            sc = st.get('object_score')
-                            for i in range(inst.shape[0]):
-                                m = inst[i].squeeze()
-                                if m.shape[-2:] != (zoomed_h, zoomed_w):
-                                    m = _F.interpolate(
-                                        m.view(1, 1, *m.shape[-2:]),
-                                        size=(zoomed_h, zoomed_w), mode='bilinear',
-                                        align_corners=False).squeeze()
-                                s = float(sc[i]) if sc is not None and i < len(sc) else 1.0
-                                resp = _torch.max(resp, (m * s).float())
-                        tile_mask += (resp > _dyn_thd).float().cpu().numpy()
-            else:
-                pred = result[0].pred_sem_seg.data.cpu().numpy().squeeze(0)
-                tile_mask = np.zeros_like(pred, dtype=np.float64)
-                for idx in target_indices:
-                    tile_mask += (pred == idx).astype(np.float64)
-
-            # 及时释放激活缓存，防止多瓦片累积碎片导致 OOM
+            # Falcon 推理（传 PIL 对象走 base64；服务返回 RLE 再解码 union；
+            # 主 query 0 实例时自动用备选 query 重试该瓦片）
             try:
-                import torch as _torch
-                _torch.cuda.empty_cache()
-            except Exception:
-                pass
+                instances, _ = falcon_detect_with_fallback(
+                    zoomed_tile, query_variants, task="segmentation",
+                    log_prefix="[FALCON-Tile]")
+                tile_mask = falcon_instances_to_mask(instances, zoomed_h, zoomed_w).astype(np.float64)
+            except Exception as e:
+                print(f"[FALCON-Tile] 瓦片 ({row},{col}) 推理失败: {e}")
+                raise
 
             # 缩放回原始瓦片大小
             tile_mask_resized = cv2.resize(
@@ -792,13 +583,13 @@ def run_tile_based_inference(image_path, text_prompt, output_dir,
             _write_progress("inference", processed, total_tiles,
                             f"瓦片推理 {processed}/{total_tiles} ({pct}%)")
             if processed % 5 == 0 or processed == total_tiles:
-                print(f"[SAM-Tile] 进度: {processed}/{total_tiles}")
+                print(f"[FALCON-Tile] 进度: {processed}/{total_tiles}")
 
     counter[counter == 0] = 1e-6
     score = accumulator / counter
 
-    # === 合并阈值（瓦片内部模型已做阈值过滤，此处用固定低阈值即可） ===
-    _threshold = float(os.environ.get("SAM_MERGE_THRESHOLD", "0.35"))
+    # === 合并阈值 ===
+    _threshold = float(os.environ.get("FALCON_MERGE_THRESHOLD", "0.35"))
     if _threshold <= 0:
         # 自适应：基于 score 分布的 p50 分位数，但上限不超过 0.8
         valid_scores = score[score > 0]
@@ -812,10 +603,7 @@ def run_tile_based_inference(image_path, text_prompt, output_dir,
     merged_mask = score > threshold
     merged_mask = merged_mask.astype(np.uint8)
 
-    # 应用 beta 优先级加权（与 run_sam_inference 对称）
-    merged_mask = apply_beta_priority(merged_mask, None, text_prompt, target_indices)
-
-    print(f"[SAM-Tile] 瓦片合并完成，mask 尺寸: {full_H}x{full_W}, "
+    print(f"[FALCON-Tile] 瓦片合并完成，mask 尺寸: {full_H}x{full_W}, "
           f"threshold={threshold:.3f}, mask_ratio={merged_mask.sum() / merged_mask.size:.4f}")
     return merged_mask, (full_H, full_W)
 
@@ -824,7 +612,7 @@ def requery_main(image_path, coarse_geojson, text_prompt, img_bounds, output_dir
     """
     Requery 精修推理：
     对粗检测结果中的每个几何体，计算像素外接矩形 → 裁剪区域 →
-    SAM3 再推理 → 输出精修 GeoJSON。
+    Falcon 再推理 → 输出精修 GeoJSON。
 
     输入:
       image_path: 原始裁剪影像路径 (PNG)
@@ -837,23 +625,14 @@ def requery_main(image_path, coarse_geojson, text_prompt, img_bounds, output_dir
     返回:
       精修后的 GeoJSON FeatureCollection (EPSG:4326)
     """
-    import torch
-    from torchvision import transforms
-    from mmengine.structures import BaseDataElement, PixelData
-    import cv2
-
-    class SegDataSample(BaseDataElement):
-        pass
-
     if output_dir is None:
-        output_dir = tempfile.mkdtemp(prefix="sam_requery_")
+        output_dir = tempfile.mkdtemp(prefix="falcon_requery_")
     else:
         os.makedirs(output_dir, exist_ok=True)
 
     start_time = time.time()
-    target_indices = resolve_target_indices(text_prompt)
 
-    model = get_sam_model()
+    query = resolve_query(text_prompt)
 
     full_img = Image.open(image_path).convert('RGB')
     full_W, full_H = full_img.size  # pixel dimensions
@@ -944,28 +723,16 @@ def requery_main(image_path, coarse_geojson, text_prompt, img_bounds, output_dir
         crop_path = os.path.join(output_dir, f"requery_{feat_idx:04d}.png")
         crop.save(crop_path)
 
-        # c. SAM3 推理
-        ds = SegDataSample()
-        ds.set_metainfo({
-            'img_path': crop_path,
-            'ori_shape': (crop_h, crop_w),
-        })
-
+        # c. Falcon 推理（小裁剪区域单次查询）
         try:
-            result = model.predict(None, data_samples=[ds])
+            instances, _ = falcon_detect_with_fallback(crop_path, query_variants, task="segmentation")
+            refined_mask = falcon_instances_to_mask(instances, crop_h, crop_w)
         except Exception as e:
             print(f"[Requery] 特征 {feat_idx} 推理失败: {e}")
             refined_features.append(feat)
             kept_original += 1
             continue
 
-        seg_pred = result[0].pred_sem_seg.data.cpu().numpy().squeeze(0)
-
-        refined_mask = np.zeros_like(seg_pred, dtype=np.uint8)
-        for idx in target_indices:
-            refined_mask |= (seg_pred == idx).astype(np.uint8)
-
-        refined_mask = apply_beta_priority(refined_mask, None, text_prompt, target_indices)
         # d. 提取精修多边形（像素坐标 → 地理坐标）
         refined_polygons_px = mask_to_polygons(refined_mask, min_area=20)
         refined_polygons_px = mask_to_polygons(refined_mask, min_area=50, epsilon_ratio=0.01)
@@ -992,7 +759,7 @@ def requery_main(image_path, coarse_geojson, text_prompt, img_bounds, output_dir
                 },
                 "properties": {
                     **(feat.get("properties") or {}),
-                    "source": "sam_requery",
+                    "source": "falcon_requery",
                     "refined": True,
                     "requery_confidence": round(float(refined_mask.sum()) / max(refined_mask.size, 1), 4),
                 }
@@ -1062,39 +829,22 @@ def pixel_to_geo(poly_pixels, img_bounds, img_shape):
 
 
 def choose_tile_params(img_w, img_h):
-    """自适应瓦片尺寸：按图像大小 + GPU 实际可用显存选择。
+    """自适应瓦片尺寸：按图像大小选择。
 
-    与 vLLM 共卡时剩余显存有限，必须用小瓦片控制单次前向激活（否则 OOM 静默返空）。
+    Falcon 0.6B bf16 显存占用仅 ~2GB，单瓦片前向激活小，
+    原按共卡剩余显存收缩瓦片的 SAM3 逻辑简化为纯图像尺寸策略。
     """
-    import torch
     max_side = max(img_w, img_h)
     area = img_w * img_h
 
-    # 查询 GPU 实际可用显存（GiB）；查询失败按独占假设
-    free_gib = 48.0
-    try:
-        if torch.cuda.is_available():
-            free_gib = torch.cuda.mem_get_info()[0] / (1024 ** 3)
-    except Exception:
-        pass
-    print(f"[SAM] GPU 可用显存: {free_gib:.1f} GiB")
-
-    if free_gib < 6:
-        # 显存紧张：512 瓦片 + 2x 放大（等效 1024px 前向，小目标仍可检测）
-        params = {"tile_size": 512, "zoom_factor": 2, "overlap": 32}
-    elif free_gib < 10:
-        # 中等：1024 瓦片直接推理
-        params = {"tile_size": 1024, "zoom_factor": 1, "overlap": 48}
+    if max_side <= 2000 and area <= 4_000_000:
+        params = {"tile_size": 1024, "zoom_factor": 2, "overlap": 64}
+    elif max_side <= 4000 and area <= 15_000_000:
+        params = {"tile_size": 1536, "zoom_factor": 1, "overlap": 64}
     else:
-        # 显存充足（原策略）
-        if max_side <= 2000 and area <= 4_000_000:
-            params = {"tile_size": 1024, "zoom_factor": 2, "overlap": 64}
-        elif max_side <= 4000 and area <= 15_000_000:
-            params = {"tile_size": 1536, "zoom_factor": 1, "overlap": 64}
-        else:
-            params = {"tile_size": 2048, "zoom_factor": 1, "overlap": 64}
+        params = {"tile_size": 2048, "zoom_factor": 1, "overlap": 64}
 
-    print(f"[SAM] 瓦片参数（显存自适应）: {params}")
+    print(f"[FALCON] 瓦片参数: {params}")
     return params
 
 
@@ -1102,34 +852,34 @@ def main(geometry, prompt, output_dir=None, use_tile_mode=True, fast_mode=False,
          custom_image_path=None, custom_bounds=None):
     """
     主推理流程（支持多种模式）
-    
+
     demo_mode: 超快速演示模式（crop→1024px, 单次推理/API调用, 无后处理）
     fast_mode: 快速模式（降低分辨率 + 跳过验证 + 轻量后处理）
-    quick_mode: 建筑类目标跳过SAM，直接用色彩特征检测
-    use_tile_mode: SAM 瓦片分割推理模式
+    quick_mode: 快速裁剪模式（低分辨率裁剪，色彩敏感目标）
+    use_tile_mode: Falcon 瓦片分割推理模式
     custom_image_path: 若提供，跳过本地TIF裁剪，直接使用该影像文件
     custom_bounds: 配合 custom_image_path 使用，影像覆盖的地理范围 (minx,miny,maxx,maxy) EPSG:4326
     """
     if output_dir is None:
-        output_dir = tempfile.mkdtemp(prefix="sam_detect_")
+        output_dir = tempfile.mkdtemp(prefix="falcon_detect_")
     else:
         os.makedirs(output_dir, exist_ok=True)
-    
+
     start_time = time.time()
-    
+
     # 1. 解析 GeoJSON 获取边界
     geom = shape(geometry)
     bounds = geom.bounds
-    
-    print(f"[SAM] 边界: {bounds}")
-    print(f"[SAM] 提示词: {prompt}")
-    print(f"[SAM] 后端: {SAM_BACKEND}")
+
+    print(f"[FALCON] 边界: {bounds}")
+    print(f"[FALCON] 提示词: {prompt}")
+    print(f"[FALCON] 模型: Falcon-Perception (tiiuae/Falcon-Perception)")
     mode_labels = []
     if demo_mode: mode_labels.append("DEMO")
     elif fast_mode: mode_labels.append("FAST")
     if quick_mode: mode_labels.append("QUICK")
     if use_tile_mode: mode_labels.append("TILE")
-    print(f"[SAM] 模式: {'+'.join(mode_labels) if mode_labels else '标准'}")
+    print(f"[FALCON] 模式: {'+'.join(mode_labels) if mode_labels else '标准'}")
     _write_progress("init", 0, 1, f"解析区域边界完成，准备裁剪影像...")
     
     # 2. 获取影像
@@ -1141,7 +891,7 @@ def main(geometry, prompt, output_dir=None, use_tile_mode=True, fast_mode=False,
         else:
             bounds = geom.bounds
         img_w, img_h = Image.open(img_path).size
-        print(f"[SAM] 使用自定义影像: {img_path} ({img_w}x{img_h}), bounds={bounds}")
+        print(f"[FALCON] 使用自定义影像: {img_path} ({img_w}x{img_h}), bounds={bounds}")
         _write_progress("cropped", 0, 1, f"使用预下载影像（{img_w}x{img_h}），加载模型中...")
     else:
         # === 从本地 TIF 裁剪影像 ===
@@ -1165,7 +915,7 @@ def main(geometry, prompt, output_dir=None, use_tile_mode=True, fast_mode=False,
             _write_progress("cropped", 0, 1, f"影像裁剪完成（{img_w}x{img_h}），加载模型中...")
         except Exception as e:
             # 本地 TIF 缺失/裁剪失败 → 自动回退在线影像服务（与前端底图同源）
-            print(f"[SAM] 本地TIF裁剪失败: {e}，尝试在线影像兜底...")
+            print(f"[FALCON] 本地TIF裁剪失败: {e}，尝试在线影像兜底...")
             _write_progress("cropping", 0, 1, "本地影像缺失，改用在线影像服务...")
             try:
                 img_path, actual_bounds = crop_image_from_arcgis_tiles(
@@ -1179,12 +929,12 @@ def main(geometry, prompt, output_dir=None, use_tile_mode=True, fast_mode=False,
                 _write_progress("error", 0, 1, f"影像获取失败: {e2}")
                 return {"type": "FeatureCollection", "features": []}
     
-    # 3. SAM 推理
+    # 3. Falcon 推理
     try:
         _write_progress("inference_start", 0, 100, "开始目标识别推理...")
         if demo_mode:
             # Demo 模式: 单次推理，快速出结果
-            mask, seg_shape = run_sam_inference(img_path, prompt, output_dir)
+            mask, seg_shape = run_falcon_inference(img_path, prompt, output_dir)
         elif use_tile_mode:
             tile_params = choose_tile_params(img_w, img_h)
             if fast_mode:
@@ -1193,7 +943,7 @@ def main(geometry, prompt, output_dir=None, use_tile_mode=True, fast_mode=False,
                     "zoom_factor": 1,
                     "overlap": 16,  # 快速模式减少重叠
                 }
-            print(f"[SAM] 自适应参数: tile={tile_params['tile_size']}, zoom={tile_params['zoom_factor']}x, overlap={tile_params['overlap']}")
+            print(f"[FALCON] 自适应参数: tile={tile_params['tile_size']}, zoom={tile_params['zoom_factor']}x, overlap={tile_params['overlap']}")
             mask, seg_shape = run_tile_based_inference(
                 img_path, prompt, output_dir,
                 tile_size=tile_params['tile_size'],
@@ -1201,11 +951,11 @@ def main(geometry, prompt, output_dir=None, use_tile_mode=True, fast_mode=False,
                 overlap=tile_params['overlap']
             )
         else:
-            mask, seg_shape = run_sam_inference(img_path, prompt, output_dir)
+            mask, seg_shape = run_falcon_inference(img_path, prompt, output_dir)
 
         _write_progress("inference_done", 90, 100, "推理完成，正在生成多边形...")
     except Exception as e:
-        print(f"[SAM] 推理失败: {e}")
+        print(f"[FALCON] 推理失败: {e}")
         _write_progress("error", 0, 1, f"推理失败: {e}")
         import traceback
         traceback.print_exc()
@@ -1213,7 +963,7 @@ def main(geometry, prompt, output_dir=None, use_tile_mode=True, fast_mode=False,
     
     polygons_px = mask_to_polygons(mask, min_area=50)
     polygons_px = mask_to_polygons(mask, min_area=50, epsilon_ratio=0.01)
-    print(f"[SAM] 检测到 {len(polygons_px)} 个多边形")
+    print(f"[FALCON] 检测到 {len(polygons_px)} 个多边形")
     
     # 5. 像素坐标转地理坐标
     img = Image.open(img_path)
@@ -1242,15 +992,15 @@ def main(geometry, prompt, output_dir=None, use_tile_mode=True, fast_mode=False,
                 })
     
     # 6. 保存 SHP（demo/fast 模式不保存）
-    if features and os.environ.get("SAM_WRITE_SHP", "0") == "1" and not demo_mode:
+    if features and os.environ.get("FALCON_WRITE_SHP", "0") == "1" and not demo_mode:
         import geopandas as gpd
         gdf = gpd.GeoDataFrame.from_features(features, crs="EPSG:4326")
-        shp_path = os.path.join(output_dir, "sam_result.shp")
+        shp_path = os.path.join(output_dir, "falcon_result.shp")
         gdf.to_file(shp_path)
-        print(f"[SAM] SHP 已保存: {shp_path}")
+        print(f"[FALCON] SHP 已保存: {shp_path}")
     
     elapsed = time.time() - start_time
-    print(f"[SAM] 完成！耗时 {elapsed:.1f}s，输出 {len(features)} 个图斑")
+    print(f"[FALCON] 完成！耗时 {elapsed:.1f}s，输出 {len(features)} 个图斑")
     _write_progress("done", 100, 100, f"完成！检测到 {len(features)} 个目标，耗时 {elapsed:.1f}s")
     
     return {"type": "FeatureCollection", "features": features}
@@ -1259,13 +1009,13 @@ def main(geometry, prompt, output_dir=None, use_tile_mode=True, fast_mode=False,
 def point_predict(points, labels, image_bounds=None, image_path=None, prompt="object"):
     """点提示分割（--point 模式）。
 
-    注意：此函数的原始实现（约 200 行，基于 SAM3 geometric prompt）在一次未收尾的
-    重构中被删除，源码无法从 git 干净还原（字节码已抢救备份，待还原）。
-    文本提示识别（main）不依赖本函数，不受影响。点提示模式暂不可用。
+    注意：此函数的原始实现（约 200 行，基于旧 SAM3 模型的 geometric prompt）已删除。
+    Falcon 仅支持文本 query（自由表达即可描述目标），点提示模式不再需要；
+    文本提示识别（main）不依赖本函数。
     """
     return {
         "polygons": [],
-        "message": "点提示模式(point_predict)暂不可用：原始实现已丢失，待还原。请改用文本提示识别。",
+        "message": "点提示模式(point_predict)已随 SAM3 下线。Falcon 使用文本 query 即可描述目标，请改用文本提示识别。",
     }
 
 
@@ -1285,8 +1035,8 @@ if __name__ == "__main__":
         sys.exit(0)
 
     if len(sys.argv) < 3:
-        print("用法: python sam_predict.py <geometry_json> <prompt> [--fast] [--quick] [--demo] [--requery]")
-        print("  --point: 点提示模式，从 stdin 读取 JSON")
+        print("用法: python falcon_detect.py <geometry_json> <prompt> [--fast] [--quick] [--demo] [--requery]")
+        print("  --point: 点提示模式（已下线，Falcon 使用文本 query）")
         print("  --requery: 从 stdin 读取粗检测 GeoJSON，执行精修推理")
         sys.exit(1)
     
@@ -1297,7 +1047,7 @@ if __name__ == "__main__":
         # ── Requery 精修模式 ──
         # stdin: 粗检测 GeoJSON FeatureCollection
         coarse_json = json.loads(sys.stdin.read())
-        output_dir = tempfile.mkdtemp(prefix="sam_requery_")
+        output_dir = tempfile.mkdtemp(prefix="falcon_requery_")
         # 从本地 TIF 裁剪影像（使用标准分辨率，不做缩放）
         img_path = os.path.join(output_dir, "requery_input.png")
         geom = shape(geometry)
@@ -1306,14 +1056,10 @@ if __name__ == "__main__":
                 geom.bounds, img_path, target_size=None)
         except Exception as e:
             print(f"[Requery] 本地TIF裁剪失败: {e}，尝试在线影像兜底...", file=sys.stderr)
-            try:
-                img_path, actual_bounds = crop_image_from_arcgis_tiles(
-                    geom.bounds, img_path, target_size=None)
-            except Exception as e2:
-                print(f"[Requery] 影像获取失败: {e2}", file=sys.stderr)
-                result = {"type": "FeatureCollection", "features": []}
-        else:
-            result = requery_main(img_path, coarse_json, prompt, actual_bounds, output_dir)
+            # 在线兜底失败时抛异常 → 子进程非 0 退出，由调用方报错
+            img_path, actual_bounds = crop_image_from_arcgis_tiles(
+                geom.bounds, img_path, target_size=None)
+        result = requery_main(img_path, coarse_json, prompt, actual_bounds, output_dir)
     else:
         fast_mode = "--fast" in sys.argv[3:]
         quick_mode = "--quick" in sys.argv[3:]
