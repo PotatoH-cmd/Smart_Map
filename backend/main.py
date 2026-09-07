@@ -169,10 +169,11 @@ from contextlib import asynccontextmanager
 # SQLite 会话持久化
 # ---------------------------------------------------------------------------
 # 路径策略：优先环境变量 MAPASSIST_DB_PATH，默认项目 backend/sessions.db（不再硬编码旧机器路径）
-DB_PATH = os.environ.get(
-    "MAPASSIST_DB_PATH",
-    os.path.join(os.path.dirname(os.path.abspath(__file__)), "sessions.db"),
-)
+# P1.5：env 读取统一收敛至 core/config.py，此处仅保留原常量名 re-export（routers 引用兼容）
+# ---------------------------------------------------------------------------
+from core.config import db as _cfg_db, falcon as _cfg_falcon, postgis as _cfg_postgis  # noqa: E402
+
+DB_PATH = _cfg_db.path
 _LEGACY_DB_PATH = "/home/server/python/map_assistant_v1/backend/sessions.db"
 if not os.path.exists(DB_PATH) and os.path.exists(_LEGACY_DB_PATH):
     # 一次性迁移：旧机器硬编码路径存在而新路径不存在时复制过来
@@ -186,17 +187,11 @@ if not os.path.exists(DB_PATH) and os.path.exists(_LEGACY_DB_PATH):
 # 脚本（falcon_detect.py）负责影像获取/瓦片/融合/GeoJSON，模型推理走常驻服务
 # falcon_service.py（FALCON_SERVICE_URL），避免每请求冷加载模型。
 _FALCON_SCRIPT_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tools", "falcon_detect.py")
-_FALCON_PYTHON_BIN = os.environ.get("FALCON_PYTHON_BIN", "/home/szgczx/miniconda3/envs/mapagent6/bin/python")
-FALCON_SERVICE_URL = os.environ.get("FALCON_SERVICE_URL", "http://127.0.0.1:8765").rstrip("/")
+_FALCON_PYTHON_BIN = _cfg_falcon.python_bin
+FALCON_SERVICE_URL = _cfg_falcon.service_url
 
 # PostgreSQL 连接配置（环境变量注入，见 .env GEOSERVER_PG_*）
-_PG_CONN = {
-    "host": os.environ.get("GEOSERVER_PG_HOST", "172.136.16.52"),
-    "port": int(os.environ.get("GEOSERVER_PG_PORT", "5432")),
-    "dbname": os.environ.get("GEOSERVER_PG_DB", "postgres"),
-    "user": os.environ.get("GEOSERVER_PG_USER", "postgres"),
-    "password": os.environ.get("GEOSERVER_PG_PASSWORD", ""),
-}
+_PG_CONN = _cfg_postgis.as_dict()
 
 def init_db():
     with contextlib.closing(sqlite3.connect(DB_PATH)) as conn:
@@ -1388,7 +1383,8 @@ _register_custom_raster_layers()
 if __name__ == "__main__":
     import uvicorn
     import socket
-    _port = int(os.environ.get("PORT") or os.environ.get("APP_PORT") or "8006")
+    from core.config import server
+    _port = server.port
     # 创建带 SO_REUSEADDR 的 socket，避免 PM2 重启时端口抢占导致启动失败
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
