@@ -6,7 +6,7 @@
 
 一句话，驱动一张图。一个意图，调度整个空间计算集群。
 
-*LLM Agent × 三引擎地图 × 混合检索 RAG × 长短期记忆 × 遥感视觉大模型*
+*LLM Agent × 工具中台 × 三引擎地图 × 混合检索 RAG × 长短期记忆 × 遥感视觉大模型*
 
 [![Python](https://img.shields.io/badge/Python-3.10+-3776AB?style=flat-square&logo=python&logoColor=white)]()
 [![FastAPI](https://img.shields.io/badge/FastAPI-009688?style=flat-square&logo=fastapi&logoColor=white)]()
@@ -68,6 +68,7 @@ sequenceDiagram
 - **三地图引擎** — Leaflet 2D、Cesium 3D、GeoLibre 实景地球同屏联动，深链接动态注入图层。
 - **遥感视觉大模型** — Falcon-Perception 自由文本目标分割（0 实例自动降级重试 + 逐实例精修），SegEarth-OV-3 双时相变化检测。
 - **QGIS MCP** — 大模型直驱 QGIS 空间分析引擎，缓冲区/叠加/裁剪开口即算。
+- **微服务工具中台** — Native / MCP / HTTP / Skill 四类 Provider 统一注册调度，意图识别独立成服务，目录即配置，故障自动回退。
 - **一键报告** — RTK 测点 + 无人机影像 + 监测数据，Word 报告自动成文。
 - **断线自愈** — Run 生命周期持久化，SSE 断线重连 + 事件流补拉 + 检查点恢复。
 - **生产就绪** — PM2 托管、每日备份、TTL 清理、内存淘汰，7×24 稳定运行。
@@ -85,7 +86,12 @@ graph TB
         Map2D["Leaflet 2D"]
         Globe["GeoLibre 地球<br/>iframe 深链接注入"]
         Map3D["Cesium 3D"]
-        Panels["管理面板群<br/>Falcon · 切片 · 知识库"]
+        Panels["管理面板群<br/>Falcon · 切片 · 知识库 · 工具中台"]
+    end
+
+    subgraph SVC["微服务层 · 可选，故障自动回退进程内"]
+        HUB["🧰 Tool Hub :8011<br/>工具唯一事实源 · 四类 Provider"]
+        ISVC["🎯 Intent Service :8010<br/>无业务意图识别"]
     end
 
     subgraph BE["后端 · FastAPI :8006"]
@@ -114,14 +120,17 @@ graph TB
     Engine <--> Graph
     Graph <--> LLM
     Graph <--> Memory
+    Graph <-->|"TOOL_HUB_URL"| HUB
+    Graph <-->|"INTENT_SERVICE_URL"| ISVC
+    HUB --> QGIS
     Memory --> EMB & RERANK & MILVUS
-    Graph <--> QGIS
     Graph --> GS & PG
     Graph -.-> FALCON & SAM3
     Memory --> KUZU
 
     style FE fill:#eff6ff,stroke:#2563eb
     style BE fill:#fffbeb,stroke:#d97706
+    style SVC fill:#f5f3ff,stroke:#7c3aed
     style AI fill:#fdf2f8,stroke:#db2777
     style DATA fill:#f0fdf4,stroke:#16a34a
 ```
@@ -194,7 +203,7 @@ flowchart LR
     I -->|知识检索| KA["KnowledgeAgent"]
     I -->|报告生成| RA["ReportAgent"]
     I -->|兜底闲聊| GA["GeneralAgent"]
-    MA & DA & KA & RA & GA --> T["13 注册工具"]
+    MA & DA & KA & RA & GA --> T["工具中台 43 工具"]
     T --> R["RunEngine<br/>事件流 + 检查点"]
     R -->|map_commands| M2D["2D"]
     R -->|cesium_commands| M3D["3D"]
@@ -207,16 +216,49 @@ flowchart LR
     style RC fill:#ffe4e6,stroke:#e11d48
 ```
 
-13 个注册工具覆盖全链路：
+13 个内置工具覆盖全链路，经工具中台统一注册后共 **43 个工具**可被调度：
 
 | 类别 | 工具 |
 |------|------|
 | 地图 | `map_tool` 图层加载/视角飞行 · `coordinate_marker` 打点 · `location_search` 定位 · `cesium_tool` 3D 调度 |
 | 数据 | `postgresql_tool` / `mcp_postgres_tool` PostGIS 查询 · `data_visualizer_tool` 图表渲染 |
+| 查询 | `weather_tool` 天气（和风→联网搜索降级）· `web_search_tool` 百炼联网搜索（带来源） |
 | 知识 | `knowledge_base_tool` LlamaIndex 混合检索（RagFlow 可切换） |
 | 分析 | `qgis_mcp_tool` QGIS 空间分析 · `spatial_processing_tool` 矢量处理 · `spatial_reference_tool` 坐标转换 |
 | 报告 | `report_generator_tool` Word 报告 · `caisha_report_tool` 采砂成果报告 |
 | 遥感 | Falcon 自由文本分割 · SAM3 双时相变化检测（面板直调） |
+
+### 🧰 微服务化：工具中台 + 意图服务
+
+意图识别与工具调度从主后端解耦为两个独立微服务，**目录即配置，故障自动回退**：
+
+```mermaid
+flowchart LR
+    U(["用户消息"]) --> MAIN["主后端 :8006<br/>LangGraph 编排"]
+    MAIN <-->|"INTENT_SERVICE_URL<br/>失败回退进程内"| ISVC["Intent Service :8010<br/>无业务枚举 · 目录 TTL 拉取"]
+    MAIN <-->|"TOOL_HUB_URL<br/>失败回退进程内"| HUB["Tool Hub :8011<br/>工具目录 + 统一调用"]
+    HUB --> NAT["Native ×15<br/>tools/ 自动扫描"]
+    HUB --> MCP["MCP ×27<br/>QGIS Server 自动发现"]
+    HUB --> HTTPP["HTTP ×N<br/>YAML 声明 REST API"]
+    HUB --> SK["Skill ×1<br/>多工具编排"]
+
+    style MAIN fill:#fffbeb,stroke:#d97706
+    style HUB fill:#f5f3ff,stroke:#7c3aed
+    style ISVC fill:#f5f3ff,stroke:#7c3aed
+```
+
+| Provider | 接入方式 | 新增成本 |
+|----------|----------|----------|
+| **Native** | `tools/` 继承 BaseTool 自动扫描，`tools.yaml` 覆盖元数据（意图/关键词/约束段） | 最多改 2 处 |
+| **MCP** | `tools.yaml` 声明 server → 自动发现全部远端工具，命名 `mcp_{server}_{tool}` | 零代码 |
+| **HTTP** | YAML 声明 endpoint/method/headers，把任意外部 REST API（天地图、高德等）接成标准工具 | 零代码 |
+| **Skill** | `skills.yaml` 编排多工具为复合技能，对外表现为单一工具 | 仅写编排 |
+
+设计要点：
+
+- **意图服务无业务倾向** — 意图目录 `intents.yaml`、工具映射全部来自中台目录，DB schema 等业务上下文由调用方注入，天然可复用到其他项目；
+- **全链路降级** — 两个微服务任一宕机，主后端日志出现 `fallback local` 并自动回退进程内实现，对话永不中断；
+- **前端控制台** — 「🧰 工具中台」页面提供工具目录 / Provider 筛选 / 启用开关 / MCP 状态卡 / Skill 编排可视化，内置**工具试跑**（按 schema 生成表单）与**意图试跑**（置信度 + 执行计划实时预览）。
 
 ---
 
@@ -264,6 +306,17 @@ Smart_Map/
 ├── backend/
 │   ├── main.py                    # FastAPI 入口 · SSE · Run 生命周期 · /api/falcon-*
 │   ├── prompts.py                 # 提示词 SSoT 单一来源
+│   ├── config/                    # 目录化配置（SSoT）
+│   │   ├── tools.yaml             # 工具元数据 · MCP Server 声明 · HTTP 工具
+│   │   ├── intents.yaml           # 意图目录（13 意图）
+│   │   └── skills.yaml            # 复合技能编排
+│   ├── core/
+│   │   ├── toolhub/               # 工具中台：四类 Provider 注册/调用/发现
+│   │   └── intent/                # 通用意图服务核心（分析器 + 目录客户端）
+│   ├── services/
+│   │   ├── tool_hub_main.py       # Tool Hub 独立进程 :8011
+│   │   ├── intent_service_main.py # Intent Service 独立进程 :8010
+│   │   └── service_proxy.py       # /api/toolhub/* · /api/intent/* 反向代理
 │   ├── agents/
 │   │   ├── task_executor.py       # LangGraph 状态图
 │   │   ├── intent_agent.py        # 意图识别（+事实记忆注入）
@@ -286,6 +339,7 @@ Smart_Map/
 │   ├── App.jsx                    # 主入口
 │   └── components/
 │       ├── FalconPanel.jsx        # 遥感识别面板（框选/进度/精修/下载）
+│       ├── ToolHubConsole.jsx     # 工具中台控制台（目录/试跑/MCP 状态）
 │       └── ...                    # Map · Cesium · 知识库面板
 ├── deploy/                        # nginx · GeoServer 编排
 └── docker/qgis-mcp/               # QGIS MCP 容器
@@ -309,10 +363,16 @@ cd backend && pip install -r requirements.txt
 # 3. 启动后端 (:8006)
 python main.py                # 或 ./start.sh [gpu] [port]
 
-# 4. 启动前端 (:3004)
+# 4. （可选）微服务化：工具中台 :8011 + 意图服务 :8010
+cd backend
+pm2 start services/tool_hub_main.py --name tool-hub --interpreter python
+pm2 start services/intent_service_main.py --name intent-service --interpreter python
+# 不启动也能跑：主后端自动回退进程内工具目录与意图识别
+
+# 5. 启动前端 (:3004)
 cd ../frontend && npm install && npm start
 
-# 5. 打开 http://localhost:3004 开始对话
+# 6. 打开 http://localhost:3004 开始对话
 ```
 
 <details>
@@ -331,6 +391,8 @@ FACT_MEMORY_ENABLED=1               # 用户事实记忆开关
 CONTEXT_HISTORY_TURNS=8             # 短期记忆预算
 GEOSERVER_URL=http://127.0.0.1:8088/geoserver
 FALCON_SERVICE_URL=http://127.0.0.1:8765   # Falcon 常驻推理服务
+TOOL_HUB_URL=http://127.0.0.1:8011   # 工具中台（不配=进程内回退）
+INTENT_SERVICE_URL=http://127.0.0.1:8010  # 意图服务（不配=进程内回退）
 
 # frontend/.env
 PORT=3004
@@ -412,6 +474,11 @@ GeoLibre 需独立部署（nginx 托管，默认 :8090），后端通过 `/api/g
 |------|------|
 | `POST /chat/stream` | 核心对话（SSE 流式 · 断线可恢复） |
 | `GET /api/memory/facts` | 用户事实记忆管理 |
+| `GET /api/toolhub/tools` | 工具目录（四类 Provider · 含禁用） |
+| `POST /api/toolhub/tools/{name}/invoke` | 统一工具调用（经中台分发） |
+| `POST /api/toolhub/tools/reload` | 重载目录配置（tools.yaml/skills.yaml） |
+| `GET /api/toolhub/mcp/servers` | MCP Server 连接状态 |
+| `POST /api/intent/analyze` | 意图分析（反向代理 :8010） |
 | `POST /api/falcon-detect` | Falcon 自由文本目标识别（异步子进程） |
 | `GET /api/falcon-progress/{task_id}` | 检测进度追踪 |
 | `POST /api/falcon-requery` | 逐实例精修重推理 |
@@ -438,6 +505,8 @@ GeoLibre 需独立部署（nginx 托管，默认 :8090），后端通过 `/api/g
 - [x] GeoLibre 三维工作台集成
 - [x] Run 断线重连与检查点恢复
 - [x] Falcon 开放词汇遥感识别（常驻服务 + 降级重试 + 精修）
+- [x] 联网搜索（DashScope Responses API · 带来源引用）
+- [x] 微服务工具中台（四类 Provider · MCP 自动发现 · 控制台试跑）+ 意图服务解耦
 - [ ] Kuzu 知识图谱摄取管线
 - [ ] 多用户体系与事实隔离
 - [ ] 语音交互
@@ -446,7 +515,7 @@ GeoLibre 需独立部署（nginx 托管，默认 :8090），后端通过 `/api/g
 
 ## 🤝 贡献与文档
 
-欢迎 Issue / PR。添加工具：在 `backend/tools/` 继承 `qwen_agent.tools.base.BaseTool` → `tool_registry.py` 注册 → 可选在 `agent_harness.py` 加快速路由关键词。添加 Agent：继承 `BaseAgent` → `_dispatch()` 分派 → LangGraph 加节点。所有提示词统一维护在 `backend/prompts.py`（SSoT 原则）。
+欢迎 Issue / PR。添加工具：在 `backend/tools/` 继承 `qwen_agent.tools.base.BaseTool` 即自动进入中台目录（需要意图路由/参数约束时在 `config/tools.yaml` 加一段元数据，最多 2 处），前端「工具中台」控制台可即时试跑；外部 REST API 直接在 `tools.yaml` 的 `http_tools` 段声明，零代码接入。添加 Agent：继承 `BaseAgent` → `_dispatch()` 分派 → LangGraph 加节点。所有提示词统一维护在 `backend/prompts.py`（SSoT 原则）。
 
 深入文档：
 

@@ -1,4 +1,5 @@
 import asyncio
+import httpx
 import json
 import logging
 import operator
@@ -212,12 +213,19 @@ class TaskExecutor:
         analysis_input = user_msg
         if workspace_summary:
             analysis_input = f"{workspace_summary}\n\n【用户本轮输入】\n{user_msg}"
-        # 阶段6：view_hint 用于地图类工具约束的按需注入（2D/3D 二选一）
-        intent_result = self.intent_agent.analyze(
-            analysis_input,
-            state.get("chat_history"),
-            view_hint=state.get("view_hint"),
-        )
+
+        # 服务化路径：INTENT_SERVICE_URL 配置时优先走意图服务，失败回退进程内 IntentAgent
+        intent_result = self._remote_intent_analyze(
+            analysis_input, state.get("chat_history"), state.get("view_hint"))
+        if intent_result is not None:
+            logger.info("[intent_node] Remote intent service used")
+        else:
+            # 阶段6：view_hint 用于地图类工具约束的按需注入（2D/3D 二选一）
+            intent_result = self.intent_agent.analyze(
+                analysis_input,
+                state.get("chat_history"),
+                view_hint=state.get("view_hint"),
+            )
 
         # ── 修复：LLM 有时漏填 tool 字段，导致 _route_after_intent 跳过 tool_node ──
         # 对于空间分析/处理类意图，若 execution_plan 有步骤但未指定 tool，自动补全
@@ -257,6 +265,49 @@ class TaskExecutor:
         )
         state["intent_result"] = intent_result
         return state
+
+    def _remote_intent_analyze(self, analysis_input: str,
+                               chat_history: Optional[List[Dict]],
+                               view_hint: Optional[str]) -> Optional[IntentResult]:
+        """通过意图服务（INTENT_SERVICE_URL）做意图分析；未配置或失败返回 None。"""
+        url = os.environ.get("INTENT_SERVICE_URL")
+        if not url:
+            return None
+        # 注入业务上下文（意图服务自身无业务知识）
+        db_schema = ""
+        try:
+            from tools.schema_manager import SchemaManager
+            db_schema = SchemaManager.instance().get_formatted_schema() or ""
+        except Exception:
+            pass
+        facts_context = ""
+        try:
+            from .fact_memory import build_facts_context
+            facts_context = build_facts_context()
+        except Exception:
+            pass
+        payload = {
+            "message": analysis_input,
+            "history": chat_history or [],
+            "context": {"view": view_hint,
+                        "extra": {"db_schema": db_schema, "facts_context": facts_context}},
+        }
+        try:
+            resp = httpx.post(f"{url.rstrip('/')}/v1/intent/analyze", json=payload, timeout=90.0)
+            resp.raise_for_status()
+            d = resp.json()
+            return IntentResult(
+                primary_intent=d.get("primary_intent", "unknown"),
+                confidence=float(d.get("confidence", 0.0)),
+                entities=d.get("entities") or [],
+                task_context=d.get("task_context", ""),
+                execution_plan=[TaskStep(**s) for s in (d.get("execution_plan") or [])],
+                requires_confirmation=bool(d.get("requires_confirmation", False)),
+                suggestions=d.get("suggestions") or [],
+            )
+        except Exception as e:
+            logger.warning(f"[intent_node] Intent service unavailable, fallback local: {e}")
+            return None
 
     def _build_numeric_fallback_step(self, user_msg: str) -> Optional[TaskStep]:
         """数值查询兑底：构造 postgresql_tool 步骤查 ceshen 表。
@@ -318,13 +369,31 @@ class TaskExecutor:
                 normal_steps.append(s)
 
         async def _invoke_step(step, extra_params: Dict = None) -> Dict:
+            params = step.params or {}
+            if extra_params:
+                params.update(extra_params)
+            # 服务化路径：TOOL_HUB_URL 配置时统一走工具中台，失败回退进程内实例
+            hub_url = os.environ.get("TOOL_HUB_URL")
+            if hub_url:
+                try:
+                    resp = await asyncio.get_event_loop().run_in_executor(
+                        None,
+                        lambda: httpx.post(
+                            f"{hub_url.rstrip('/')}/v1/tools/{step.tool}/invoke",
+                            json={"params": params}, timeout=600.0),
+                    )
+                    resp.raise_for_status()
+                    result = resp.json()
+                    logger.info(f"[tool_node] Via tool-hub: {step.tool}, "
+                                f"success={result.get('success')}, {result.get('elapsed_ms', 0)}ms")
+                    return {"tool_name": step.tool, "result": result}
+                except Exception as e:
+                    logger.warning(f"[tool_node] tool-hub invoke failed for {step.tool}, "
+                                   f"fallback local: {e}")
             adapter = self._get_tool_adapter(step.tool)
             if adapter is None:
                 logger.warning(f"[tool_node] Tool not available: {step.tool}")
                 return {"tool_name": step.tool, "result": {"success": False, "error": f"工具 {step.tool} 不可用"}}
-            params = step.params or {}
-            if extra_params:
-                params.update(extra_params)
             logger.info(f"[tool_node] Calling tool={step.tool}, params={params}")
             loop = asyncio.get_event_loop()
             return await loop.run_in_executor(None, adapter.invoke, params)

@@ -1,0 +1,38 @@
+# skills.yaml — 复合技能定义（Skill Provider）
+#
+# 技能对外表现为一个普通工具（provider=skill），意图服务/主服务无感知。
+# steps 参数模板：
+#   $param          引用技能入参
+#   $param|默认值    入参缺失时的默认值
+#   $prev[i].path   引用前序第 i 步结果（results[-i]），按 . 路径取值
+#
+# 新增技能 = 在此加一段，即刻进入意图目录与控制台。
+
+skills:
+  - name: redline_buffer_report
+    description: "红线缓冲区分析并一键生成报告：获取采区/红线边界 → QGIS 缓冲区分析 → 生成正式报告"
+    intents: [spatial_analysis]
+    keywords: [红线缓冲区, 缓冲区报告, 缓冲区分析报告]
+    priority: 5
+    parameters:
+      - {name: area_name, type: string, required: true, description: "采区/砂场全名，如 '种子场可采区'"}
+      - {name: buffer_m, type: number, required: false, description: "缓冲距离（米），默认 200"}
+    steps:
+      - tool: spatial_reference_tool
+        params:
+          action: get_geometry
+          layer: caiqu
+      - tool: qgis_mcp_tool
+        params:
+          action: "对 $area_name 做 $buffer_m|200 米缓冲区"
+      - tool: report_generator_tool
+        params:
+          variables:
+            report_title: "$area_name 缓冲区分析报告"
+            summary: "对 $area_name 生成 $buffer_m|200 米缓冲区分析"
+            details: ""
+            conclusion: ""
+    prompt_hint: >-
+      redline_buffer_report 技能一步完成红线缓冲区分析报告，
+      参数：area_name（用户提到的采区/砂场全名）、buffer_m（缓冲距离，默认 200）。
+      命中后只规划这一个工具步骤，禁止再单独规划 spatial_reference_tool / qgis_mcp_tool / report_generator_tool。

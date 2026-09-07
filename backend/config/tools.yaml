@@ -1,0 +1,192 @@
+# tools.yaml — 工具中台声明（工具目录的 SSOT 覆盖层）
+#
+# 分层规则：
+#   1. backend/tools/*.py 自动扫描（qwen_agent @register_tool）→ 类属性提供 description/parameters
+#   2. 本文件 native 段按注册名覆盖/补充元数据（intents/keywords/priority/constraint/...）
+#   3. mcp_servers 段自动发现远端 MCP 工具（命名 mcp_{server}_{tool}，默认禁用，tools_meta.enabled 开启）
+#   4. http_tools 段声明远程 HTTP 工具
+#   5. skills.yaml 声明复合技能
+#
+# 新增工具 = 在 tools/ 加实现 + 本文件加一段元数据（或不加，直接可用）。
+
+native:
+  caisha_report_tool:
+    intents: [report_generation]
+    keywords: [采砂监测报告, 监测分析报告, 采砂场监测报告, 采砂报告]
+    priority: 10
+    excludes: [report_generator_tool]
+    constraint: >-
+      caisha_report_tool 参数格式：
+      - site_name（必填）：从用户话中提取砂场全名，如 {"site_name": "郝楼砂场"}
+      - permit_no（可选）：许可证号
+      - 只需规划这一个工具步骤，不要再规划 postgresql_tool / knowledge_base_tool / report_generator_tool 等其他步骤
+
+  qgis_mcp_tool:
+    intents: [spatial_analysis, spatial_processing, spatial_reference]
+    keywords: [缓冲区, buffer, 裁剪, clip, 叠加, 相交, 面积, 中心点, centroid, 分区统计, 空间关联]
+    priority: 20
+    constraint: >-
+      qgis_mcp_tool（QGIS空间分析引擎）参数格式：
+      - 推荐简化方式：直接用自然语言描述操作，系统自动匹配最佳算法，如
+        {"tool": "qgis_mcp_tool", "action": "对郝楼砂场做200米缓冲区"}
+      - 高级方式（需要精确控制时）：
+        加载图层：{"category": "layer", "action": "add_vector", "params": {"path": "/gis_data/xxx.shp", "name": "layer"}}
+        缓冲区：{"category": "processing", "action": "execute", "params": {"algorithm": "native:buffer", "parameters": {"INPUT": "<id>", "DISTANCE": 100}}}
+        空间关联：{"category": "analysis", "action": "spatial_join", "params": {"target_layer": "<id>", "join_layer": "<id>"}}
+      - category/action 字符串必须与 QGIS 插件提供的一致（analysis/processing/layer/render/transform 等）
+
+  spatial_processing_tool:
+    intents: [spatial_processing]
+    keywords: [坐标转换, 投影, 带号, CGCS2000, EPSG, 矢量范围, XY相反, 生成矢量]
+    priority: 30
+    constraint: >-
+      spatial_processing_tool（空间数据处理）参数格式：
+      - 生成面：{"action": "generate_polygon", "coordinates": [[x1,y1],[x2,y2],...], "source_crs": "4526"}
+      - 生成线：{"action": "generate_polyline", ...}；生成点：{"action": "generate_points", ...}
+      - XY交换：当用户说"XY相反"时，设置 "swap_xy": true
+      - 坐标系对照：CGCS2000 Zone 38N = EPSG:4526（推荐，也可用 4547）；WGS84 = EPSG:4326
+      - EPSG:4497 是 6 度带第 19 带（CM 111°E），不是 3 度带第 38 带，切勿混淆
+      - 用户提到"38带号"/"CGCS2000"/"2000国家大地坐标系" → source_crs="4526"
+      - 坐标顺序：coordinates 应为 [[easting, northing], ...]，easting（约 38M）在第一维，northing（约 3.5M）在第二维
+      - 从 OCR 文本/Excel 提取坐标时必须提取全部坐标点，不要遗漏任何一个角点
+      - 坐标不完整或转换失败时，不要猜测替代方案（如 cesium_tool），直接告知用户错误信息
+
+  spatial_reference_tool:
+    intents: [spatial_reference, data_query, map_display, cross_intent]
+    keywords: [红线, 河道, 可采区, 采区, 许可范围]
+    priority: 40
+    constraint: >-
+      spatial_reference_tool 参数格式：
+      - 获取边界：action="get_geometry"，layer='hx'（红线/河道红线）或 'caiqu'（采区/可采区）
+      - 获取几何后：查询范围内数据 → postgresql_tool(operation='spatial_query', spatial_ref_layer='hx')，无需手动传 WKT；
+        叠加显示到地图 → map_tool 加载几何
+
+  weather_tool:
+    intents: [weather_query]
+    keywords: [天气, 气温, 温度, 降雨, 下雨, 下雪, 风力, 风速, 湿度, 空气质量, AQI, 雾霾, 预报, 带伞, 紫外线]
+    priority: 50
+    constraint: >-
+      weather_tool 参数格式：
+      - {"city": "<用户提到的城市名>", "forecast_days": 1|3|7, "include_aqi": true|false}
+      - city 直接取用户提到的城市（如"郑州""信阳市淮滨县"），工具会自动解析区县；
+      - 用户已提到城市时必须直接调用，严禁反问用户要城市名
+
+  web_search_tool:
+    intents: [knowledge_search, unknown, cross_intent]
+    keywords: [新闻, 热点, 实时, 最新, 今天, 现在, 目前, 行情]
+    priority: 60
+    constraint: >-
+      web_search_tool（联网搜索）参数格式：
+      - {"query": "完整的搜索问题"}，query 用完整中文句子，如 {"query": "郑州市今天天气"}
+      - 适用于实时信息（新闻/热点/行情）、知识库与数据库覆盖不到的常识问题；
+      - 回答需在末尾标注网络来源（标题/域名）
+
+  data_visualizer_tool:
+    intents: [data_visualization]
+    keywords: [图表, 统计图, 可视化, 柱状图, 趋势, 占比, 分布图, 饼图]
+    priority: 70
+    constraint: >-
+      data_visualizer_tool 参数格式：
+      - demand（必填）：包含地区、指标、图表类型、筛选条件等完整要求。
+      - sql（可选，强烈推荐）：针对需求生成的 PostgreSQL 查询语句，可大幅提高执行效率。
+      - chart_type（可选）：'bar' | 'line' | 'pie' | 'scatter'。
+      - SQL 生成规则：字段名含大写字母必须用双引号包裹，表名通常为 'ceshen'；
+        除非用户明确要求 TOP-N，否则不要在 SQL 中加 LIMIT，应返回全部满足条件的数据。
+
+  postgresql_tool:
+    intents: [data_query]
+    keywords: [查询, 统计, 多少个, 多少, 平均, 超深, 高程, 数量, count]
+    priority: 80
+    constraint: >-
+      postgresql_tool 参数格式（只能使用 operation / sql / params）：
+      - 查询：{"operation": "query", "sql": "SELECT ...", "params": []}
+      - 表结构：{"operation": "get_db_schema"}
+      - 空间筛选：{"operation": "spatial_query", "spatial_ref_layer": "hx" 或 "caiqu"}
+      - 绝对不要输出 {"query": "SELECT ..."} 这种错误格式；字段名含大写字母必须加双引号。
+
+  report_generator_tool:
+    intents: [report_generation]
+    keywords: [报告, 出具, 文档]
+    priority: 90
+    constraint: >-
+      report_generator_tool 参数格式：
+      - variables 必须包含：report_title、summary、details、conclusion
+      - generated_date 未传入时工具会自动填充当日日期
+      - 若消息中包含 [地图截图已保存] 的系统提示，必须将其中的服务器路径作为 map_image_path 传入
+      - 若消息中没有截图路径，就不传 map_image_path，工具会自动使用最新截图
+
+  knowledge_base_tool:
+    intents: [knowledge_search]
+    keywords: [政策, 规定, 流程, 制度, 怎么办, 如何办理, 手续]
+    priority: 100
+    constraint: >-
+      knowledge_base_tool 参数格式：
+      - 检索：{"operation": "search", "query": "用户问题核心关键词"}
+      - 政策/流程/操作文档类问题必须走知识库检索，禁止查询数据库
+
+  cesium_tool:
+    intents: [map_display]
+    keywords: [三维, 3D, 飞行, 测深风险, 风险柱]
+    priority: 110
+    view_bound: true
+    constraint: >-
+      cesium_tool（3D地图）的 action 类型：
+      - 切换底图：action="setBasemap"，basemap="satellite"（卫星）| "osm"（街道）| "tianditu"（天地图）
+      - 飞行到位置：action="flyTo"，需提供 lat、lng
+      - 添加GeoJSON图层：action="addGeoJsonLayer"，需提供 table_name
+      - 测深风险柱：action="addDepthColumns"，table_name='ceshen'
+      - 清除所有：action="clearAll"
+
+  map_tool:
+    intents: [map_display, location_search, coordinate_marker]
+    keywords: [加载, 上图, 图层, 标记, 标点, 底图, 切换, 跳转, 定位, 位置, 经纬度, 清除]
+    priority: 120
+    view_bound: true
+    constraint: >-
+      map_tool（2D地图）的 action 类型：
+      - 切换底图：action="switch_layer"，layer="satellite"（卫星影像）| "arcgis"（高分影像）| "osm"（街道地图）
+      - 加载矢量图层：action="load_vector_layer"，需提供 table_name，可选 layer_name
+      - 添加标记：action="add_marker"，需提供 lat、lng
+      - 清除标记：action="clear_markers"
+      - 设置视图：action="set_view"，需提供 lat、lng、zoom
+      - 重要：filter 仅适用于 ceshen 表（如 "Mineable_Area_Name"='种子场可采区'）；
+        加载 caiqu（可采区）/ hx（红线）等图层表时不要传 filter，直接加载全部要素
+
+  # 以下工具无关键词路由/约束段，仅记录意图映射
+  location_search:
+    intents: [location_search]
+  coordinate_marker:
+    intents: [coordinate_marker]
+  mcp_postgres_tool:
+    intents: [data_query]
+
+# ---------------------------------------------------------------------------
+# MCP Server 自动发现
+# ---------------------------------------------------------------------------
+mcp_servers:
+  - name: qgis
+    transport: streamable-http    # 标准 MCP 握手（initialize → session → initialized）
+    url: "${QGIS_MCP_SERVER_URI:-http://localhost:8036}/mcp"
+    timeout: 10
+    expose: true          # 自动发现的远端工具进入目录（默认禁用，仅供控制台查看/手动启用）
+  - name: postgres
+    transport: http
+    url: "${MCP_POSTGRES_URI:-http://localhost:8009/mcp}"
+    timeout: 10
+    expose: true
+
+# ---------------------------------------------------------------------------
+# HTTP / OpenAPI 远程工具（示例格式，需要时取消注释）
+# ---------------------------------------------------------------------------
+http_tools: []
+#  - name: external_geocoder
+#    description: 外部地理编码服务
+#    endpoint: https://api.example.com/geocode
+#    method: POST
+#    params_in: json
+#    timeout: 15
+#    intents: [location_search]
+#    keywords: [经纬度查询]
+#    priority: 130
+#    parameters:
+#      - {name: address, type: string, required: true, description: "结构化地址"}

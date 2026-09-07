@@ -1,0 +1,790 @@
+/* ============================================================
+   ToolHubConsole — 工具中台控制台（浅色精致风 Light Premium）
+   白底 + 柔和多层阴影 + 渐变强调 + 等宽排版 + 微动效
+   ============================================================ */
+
+.thc-root {
+  --thc-bg-0: #f7f8fc;
+  --thc-bg-1: #eff2f8;
+  --thc-panel: #ffffff;
+  --thc-panel-soft: #f8fafd;
+  --thc-line: #e5e9f2;
+  --thc-line-strong: #d3dae8;
+  --thc-text-1: #101828;
+  --thc-text-2: #475467;
+  --thc-text-3: #98a2b3;
+  --thc-accent: #4f46e5;
+  --thc-accent-2: #0891b2;
+  --thc-grad: linear-gradient(120deg, #4f46e5 0%, #7c3aed 55%, #0ea5e9 100%);
+  --thc-ok: #12b76a;
+  --thc-err: #f04438;
+  --thc-warn: #f79009;
+  --thc-mono: 'JetBrains Mono', 'SF Mono', 'Fira Code', ui-monospace, Menlo, Consolas, monospace;
+
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  color: var(--thc-text-1);
+  font-family: -apple-system, BlinkMacSystemFont, 'PingFang SC', 'Microsoft YaHei', 'Segoe UI', sans-serif;
+  background:
+    radial-gradient(1100px 460px at 88% -12%, rgba(79, 70, 229, 0.06), transparent 60%),
+    radial-gradient(900px 420px at -8% 112%, rgba(14, 165, 233, 0.05), transparent 55%),
+    linear-gradient(180deg, var(--thc-bg-0) 0%, var(--thc-bg-1) 100%);
+}
+
+/* 自定义滚动条 */
+.thc-root ::-webkit-scrollbar { width: 9px; height: 9px; }
+.thc-root ::-webkit-scrollbar-track { background: transparent; }
+.thc-root ::-webkit-scrollbar-thumb {
+  background: rgba(71, 84, 103, 0.22);
+  border-radius: 8px;
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+.thc-root ::-webkit-scrollbar-thumb:hover { background-color: rgba(71, 84, 103, 0.38); }
+
+@keyframes thc-fade-up {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+@keyframes thc-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(18, 183, 106, 0.4); }
+  55% { box-shadow: 0 0 0 5px rgba(18, 183, 106, 0); }
+}
+@keyframes thc-shimmer {
+  from { background-position: -200px 0; }
+  to { background-position: 220px 0; }
+}
+
+/* ──────────────────── 顶部栏 ──────────────────── */
+.thc-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 18px 24px 15px;
+  border-bottom: 1px solid var(--thc-line);
+  background: rgba(255, 255, 255, 0.75);
+  backdrop-filter: blur(10px);
+  flex-shrink: 0;
+}
+.thc-title { display: flex; align-items: center; gap: 15px; }
+
+.thc-logo {
+  width: 46px;
+  height: 46px;
+  border-radius: 13px;
+  background: var(--thc-grad);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 22px;
+  box-shadow:
+    0 6px 18px rgba(79, 70, 229, 0.28),
+    inset 0 1px 0 rgba(255, 255, 255, 0.35);
+  flex-shrink: 0;
+}
+
+.thc-title-text h2 {
+  margin: 0;
+  font-size: 17px;
+  font-weight: 800;
+  letter-spacing: 0.2px;
+  color: var(--thc-text-1);
+}
+.thc-subtitle { font-size: 12px; color: var(--thc-text-3); margin-top: 2px; letter-spacing: 0.3px; }
+.thc-subtitle b { color: var(--thc-text-2); font-weight: 600; }
+
+.thc-header-actions { display: flex; align-items: center; gap: 10px; }
+.thc-reload-msg {
+  font-size: 12px;
+  color: var(--thc-accent);
+  font-weight: 600;
+  animation: thc-fade-up 0.25s ease;
+}
+
+/* ──────────────────── 按钮 ──────────────────── */
+.thc-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 16px;
+  border: 1px solid var(--thc-line-strong);
+  border-radius: 10px;
+  background: #fff;
+  color: var(--thc-text-1);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.18s cubic-bezier(0.4, 0, 0.2, 1);
+  box-shadow: 0 1px 2px rgba(16, 24, 40, 0.05);
+}
+.thc-btn:hover:not(:disabled) {
+  border-color: rgba(79, 70, 229, 0.45);
+  color: var(--thc-accent);
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(79, 70, 229, 0.14);
+}
+.thc-btn:active:not(:disabled) { transform: translateY(0); }
+.thc-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.thc-btn.primary {
+  background: var(--thc-grad);
+  border: none;
+  color: #fff;
+  font-weight: 700;
+  letter-spacing: 0.3px;
+  box-shadow: 0 4px 14px rgba(79, 70, 229, 0.32), inset 0 1px 0 rgba(255, 255, 255, 0.25);
+}
+.thc-btn.primary:hover:not(:disabled) {
+  color: #fff;
+  transform: translateY(-1px);
+  box-shadow: 0 7px 20px rgba(79, 70, 229, 0.4), inset 0 1px 0 rgba(255, 255, 255, 0.25);
+  filter: brightness(1.06);
+}
+
+/* ──────────────────── 统计胶囊 ──────────────────── */
+.thc-stats { display: flex; gap: 7px; margin-top: 9px; flex-wrap: wrap; }
+.thc-stat {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 11px;
+  border-radius: 999px;
+  border: 1px solid var(--thc-line);
+  background: #fff;
+  font-size: 11px;
+  color: var(--thc-text-2);
+  box-shadow: 0 1px 2px rgba(16, 24, 40, 0.04);
+  transition: all 0.18s;
+}
+.thc-stat:hover { border-color: var(--thc-line-strong); box-shadow: 0 2px 6px rgba(16, 24, 40, 0.07); }
+.thc-stat b { color: var(--thc-text-1); font-weight: 800; font-size: 12px; font-family: var(--thc-mono); }
+.thc-stat-dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
+
+/* ──────────────────── 主体两栏 ──────────────────── */
+.thc-body { flex: 1; display: flex; min-height: 0; }
+
+.thc-left {
+  width: 440px;
+  flex-shrink: 0;
+  border-right: 1px solid var(--thc-line);
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  background: rgba(255, 255, 255, 0.45);
+}
+.thc-right {
+  flex: 1;
+  overflow-y: auto;
+  padding: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  min-width: 0;
+}
+
+/* ──────────────────── 筛选区 ──────────────────── */
+.thc-filters {
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--thc-line);
+  display: flex;
+  flex-direction: column;
+  gap: 11px;
+  background: rgba(255, 255, 255, 0.6);
+}
+.thc-tabs { display: flex; gap: 5px; flex-wrap: wrap; }
+.thc-tab {
+  padding: 6px 14px;
+  border: 1px solid var(--thc-line);
+  border-radius: 999px;
+  background: #fff;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--thc-text-2);
+  cursor: pointer;
+  transition: all 0.18s cubic-bezier(0.4, 0, 0.2, 1);
+  box-shadow: 0 1px 2px rgba(16, 24, 40, 0.04);
+}
+.thc-tab:hover { color: var(--thc-accent); border-color: rgba(79, 70, 229, 0.35); }
+.thc-tab.active {
+  background: var(--thc-grad);
+  border-color: transparent;
+  color: #fff;
+  font-weight: 700;
+  box-shadow: 0 3px 10px rgba(79, 70, 229, 0.3);
+}
+.thc-tab.active .thc-tab-count { color: rgba(255, 255, 255, 0.85); }
+.thc-tabs.sub { margin-bottom: 4px; }
+.thc-tab .thc-tab-count {
+  font-family: var(--thc-mono);
+  font-size: 10px;
+  color: var(--thc-text-3);
+  margin-left: 4px;
+}
+
+.thc-search-wrap { position: relative; }
+.thc-search-icon {
+  position: absolute;
+  left: 12px;
+  top: 50%;
+  transform: translateY(-50%);
+  font-size: 14px;
+  color: var(--thc-text-3);
+  pointer-events: none;
+}
+.thc-search {
+  width: 100%;
+  padding: 9px 13px 9px 34px;
+  border: 1px solid var(--thc-line-strong);
+  border-radius: 10px;
+  font-size: 13px;
+  outline: none;
+  background: #fff;
+  color: var(--thc-text-1);
+  transition: all 0.18s;
+  box-sizing: border-box;
+  box-shadow: 0 1px 2px rgba(16, 24, 40, 0.04);
+}
+.thc-search::placeholder { color: var(--thc-text-3); }
+.thc-search:focus {
+  border-color: rgba(79, 70, 229, 0.55);
+  box-shadow: 0 0 0 3px rgba(79, 70, 229, 0.1);
+}
+
+/* ──────────────────── 工具列表 ──────────────────── */
+.thc-tool-list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.thc-tool-item {
+  position: relative;
+  flex-shrink: 0;
+  background: #fff;
+  border: 1px solid var(--thc-line);
+  border-radius: 12px;
+  padding: 11px 13px 11px 18px;
+  cursor: pointer;
+  transition: border-color 0.18s, box-shadow 0.18s, background 0.18s;
+  overflow: hidden;
+  animation: thc-fade-up 0.3s ease backwards;
+  box-shadow: 0 1px 3px rgba(16, 24, 40, 0.05);
+}
+/* provider 色条 */
+.thc-tool-item::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 4px;
+  background: var(--stripe, #98a2b3);
+  opacity: 0.5;
+  transition: opacity 0.18s, width 0.18s;
+}
+.thc-tool-item:hover {
+  border-color: var(--thc-line-strong);
+  box-shadow: 0 4px 12px rgba(16, 24, 40, 0.09);
+}
+.thc-tool-item:hover::before { opacity: 1; }
+.thc-tool-item.selected {
+  border-color: rgba(79, 70, 229, 0.55);
+  box-shadow: 0 0 0 1px rgba(79, 70, 229, 0.35), 0 6px 18px rgba(79, 70, 229, 0.13);
+}
+.thc-tool-item.selected::before { opacity: 1; width: 5px; }
+.thc-tool-item.disabled { opacity: 0.55; filter: grayscale(0.45); background: #fafbfc; }
+
+.thc-tool-item-head { display: flex; align-items: center; gap: 9px; }
+.thc-tool-name {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--thc-text-1);
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--thc-mono);
+  letter-spacing: -0.2px;
+}
+.thc-tool-desc {
+  font-size: 12px;
+  color: var(--thc-text-2);
+  margin-top: 5px;
+  line-height: 1.55;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.thc-tool-intents { margin-top: 7px; display: flex; flex-wrap: wrap; gap: 4px; }
+
+/* 徽标 */
+.thc-badge {
+  font-size: 10px;
+  font-weight: 700;
+  color: #fff;
+  padding: 2px 8px;
+  border-radius: 6px;
+  text-transform: uppercase;
+  letter-spacing: 0.7px;
+  flex-shrink: 0;
+  font-family: var(--thc-mono);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.28), 0 1px 3px rgba(16, 24, 40, 0.2);
+}
+.thc-intent-chip {
+  font-size: 11px;
+  font-family: var(--thc-mono);
+  padding: 2px 9px;
+  border-radius: 999px;
+  border: 1px solid rgba(79, 70, 229, 0.28);
+  background: rgba(79, 70, 229, 0.06);
+  color: var(--thc-accent);
+  transition: all 0.15s;
+}
+.thc-intent-chip:hover { background: rgba(79, 70, 229, 0.12); }
+.thc-intent-chip.big {
+  font-size: 13px;
+  font-weight: 700;
+  padding: 5px 14px;
+  box-shadow: 0 2px 8px rgba(79, 70, 229, 0.15);
+}
+
+/* ──────────────────── 启用开关 ──────────────────── */
+.thc-switch { position: relative; display: inline-block; width: 36px; height: 20px; flex-shrink: 0; }
+.thc-switch input { opacity: 0; width: 0; height: 0; }
+.thc-slider {
+  position: absolute;
+  inset: 0;
+  background: #d0d5dd;
+  border-radius: 999px;
+  cursor: pointer;
+  transition: 0.22s cubic-bezier(0.4, 0, 0.2, 1);
+}
+.thc-slider::before {
+  content: '';
+  position: absolute;
+  width: 14px;
+  height: 14px;
+  left: 3px;
+  top: 3px;
+  background: #fff;
+  border-radius: 50%;
+  transition: 0.22s cubic-bezier(0.4, 0, 0.2, 1);
+  box-shadow: 0 1px 3px rgba(16, 24, 40, 0.25);
+}
+.thc-switch input:checked + .thc-slider {
+  background: var(--thc-grad);
+  box-shadow: 0 2px 8px rgba(79, 70, 229, 0.35);
+}
+.thc-switch input:checked + .thc-slider::before { transform: translateX(16px); background: #fff; }
+
+/* ──────────────────── MCP 状态卡 ──────────────────── */
+.thc-mcp-section {
+  border-top: 1px solid var(--thc-line);
+  padding: 13px 16px;
+  flex-shrink: 0;
+  max-height: 220px;
+  overflow-y: auto;
+  background: rgba(255, 255, 255, 0.6);
+}
+.thc-section-title {
+  font-size: 10px;
+  font-weight: 800;
+  color: var(--thc-text-3);
+  margin-bottom: 9px;
+  text-transform: uppercase;
+  letter-spacing: 1.6px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.thc-section-title::after {
+  content: '';
+  flex: 1;
+  height: 1px;
+  background: linear-gradient(90deg, var(--thc-line-strong), transparent);
+}
+.thc-mcp-cards { display: flex; flex-direction: column; gap: 7px; }
+.thc-mcp-card {
+  border: 1px solid var(--thc-line);
+  border-radius: 10px;
+  padding: 9px 12px;
+  font-size: 12px;
+  background: #fff;
+  transition: all 0.18s;
+  box-shadow: 0 1px 3px rgba(16, 24, 40, 0.05);
+}
+.thc-mcp-card:hover { box-shadow: 0 3px 9px rgba(16, 24, 40, 0.08); }
+.thc-mcp-card.ok { border-left: 3px solid var(--thc-ok); }
+.thc-mcp-card.down { border-left: 3px solid var(--thc-err); }
+.thc-mcp-head { display: flex; align-items: center; gap: 9px; }
+.thc-mcp-name { font-weight: 700; color: var(--thc-text-1); font-family: var(--thc-mono); }
+.thc-mcp-transport {
+  color: var(--thc-text-2);
+  font-size: 10px;
+  font-family: var(--thc-mono);
+  padding: 1px 8px;
+  border: 1px solid var(--thc-line);
+  border-radius: 999px;
+  background: var(--thc-panel-soft);
+}
+.thc-mcp-meta { color: var(--thc-text-2); margin-top: 4px; font-size: 11px; word-break: break-all; }
+.thc-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+.thc-dot.ok { background: var(--thc-ok); animation: thc-pulse 2.2s ease infinite; }
+.thc-dot.down { background: var(--thc-err); }
+
+/* ──────────────────── 右栏 ──────────────────── */
+.thc-empty-panel {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 13px;
+  color: var(--thc-text-3);
+  font-size: 13px;
+  border: 1.5px dashed var(--thc-line-strong);
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.55);
+}
+.thc-empty-panel .thc-empty-icon { font-size: 38px; opacity: 0.45; }
+.thc-empty { text-align: center; color: var(--thc-text-3); font-size: 13px; padding: 36px 0; }
+
+.thc-detail, .thc-debug {
+  background: #fff;
+  border: 1px solid var(--thc-line);
+  border-radius: 16px;
+  padding: 20px;
+  box-shadow:
+    0 1px 2px rgba(16, 24, 40, 0.04),
+    0 8px 28px rgba(16, 24, 40, 0.06);
+  animation: thc-fade-up 0.3s ease;
+}
+.thc-detail-head { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.thc-detail-head h3 {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 800;
+  color: var(--thc-text-1);
+  font-family: var(--thc-mono);
+  letter-spacing: -0.3px;
+}
+.thc-state { font-size: 11px; padding: 3px 11px; border-radius: 999px; font-weight: 700; letter-spacing: 0.3px; }
+.thc-state.on {
+  background: rgba(18, 183, 106, 0.09);
+  color: var(--thc-ok);
+  border: 1px solid rgba(18, 183, 106, 0.3);
+}
+.thc-state.off {
+  background: rgba(240, 68, 56, 0.07);
+  color: var(--thc-err);
+  border: 1px solid rgba(240, 68, 56, 0.28);
+}
+.thc-detail-desc { font-size: 13px; color: var(--thc-text-2); margin: 12px 0 0; line-height: 1.7; }
+
+.thc-detail-grid { display: flex; flex-direction: column; gap: 16px; margin-top: 18px; }
+.thc-field-label {
+  font-size: 10px;
+  font-weight: 800;
+  color: var(--thc-text-3);
+  text-transform: uppercase;
+  letter-spacing: 1.4px;
+  margin-bottom: 8px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.thc-field-label .thc-label-count {
+  font-family: var(--thc-mono);
+  color: var(--thc-accent);
+  letter-spacing: 0;
+  font-weight: 700;
+}
+.thc-dim { color: var(--thc-text-3); font-size: 12px; font-style: italic; }
+.thc-kw-list { font-size: 12.5px; color: var(--thc-text-1); line-height: 1.9; }
+.thc-kw-kbd {
+  display: inline-block;
+  font-family: var(--thc-mono);
+  font-size: 11px;
+  padding: 2px 9px;
+  margin: 0 4px 5px 0;
+  border: 1px solid var(--thc-line-strong);
+  border-bottom-width: 2px;
+  border-radius: 7px;
+  background: #fff;
+  color: var(--thc-text-2);
+  box-shadow: 0 1px 2px rgba(16, 24, 40, 0.05);
+}
+
+/* 代码块：白底 UI 中的深色终端块（高级对比） */
+.thc-pre {
+  background: #101828;
+  border: 1px solid #1d2939;
+  border-radius: 11px;
+  padding: 13px 15px;
+  font-family: var(--thc-mono);
+  font-size: 11.5px;
+  line-height: 1.75;
+  overflow-x: auto;
+  white-space: pre-wrap;
+  word-break: break-all;
+  margin: 0;
+  color: #d0d5dd;
+  max-height: 280px;
+  overflow-y: auto;
+  box-shadow: inset 0 1px 3px rgba(0, 0, 0, 0.35), 0 2px 6px rgba(16, 24, 40, 0.1);
+}
+.thc-pre.small { max-height: 150px; font-size: 10.5px; }
+
+/* ──────────────────── Skill 编排 ──────────────────── */
+.thc-skill-steps { display: flex; flex-direction: column; gap: 0; }
+.thc-skill-step {
+  display: flex;
+  gap: 14px;
+  position: relative;
+  padding-bottom: 14px;
+}
+/* 连接线 */
+.thc-skill-step:not(:last-child)::before {
+  content: '';
+  position: absolute;
+  left: 13px;
+  top: 30px;
+  bottom: 0;
+  width: 2px;
+  background: linear-gradient(180deg, rgba(247, 144, 9, 0.45), rgba(247, 144, 9, 0.08));
+}
+.thc-skill-step:last-child { padding-bottom: 0; }
+.thc-skill-step-no {
+  width: 28px;
+  height: 28px;
+  border-radius: 9px;
+  background: linear-gradient(135deg, #f79009, #fdb022);
+  color: #fff;
+  font-size: 12px;
+  font-weight: 800;
+  font-family: var(--thc-mono);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  box-shadow: 0 3px 9px rgba(247, 144, 9, 0.35), inset 0 1px 0 rgba(255, 255, 255, 0.35);
+  position: relative;
+  z-index: 1;
+}
+.thc-skill-step-body {
+  flex: 1;
+  min-width: 0;
+  border: 1px solid var(--thc-line);
+  border-radius: 11px;
+  padding: 10px 13px;
+  background: var(--thc-panel-soft);
+}
+.thc-skill-step-tool {
+  font-size: 13px;
+  font-weight: 700;
+  color: #b54708;
+  font-family: var(--thc-mono);
+  margin-bottom: 7px;
+}
+
+/* ──────────────────── 调试台 ──────────────────── */
+.thc-debug-body { display: flex; flex-direction: column; gap: 14px; }
+.thc-param-form { display: flex; flex-direction: column; gap: 10px; }
+.thc-param-row { display: flex; align-items: center; gap: 12px; }
+.thc-param-row label {
+  width: 175px;
+  flex-shrink: 0;
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--thc-text-1);
+  text-align: right;
+  font-family: var(--thc-mono);
+}
+.thc-required { color: var(--thc-err); margin-left: 3px; font-weight: 800; }
+.thc-param-type {
+  color: var(--thc-text-3);
+  font-weight: 500;
+  margin-left: 6px;
+  font-size: 10px;
+  padding: 1px 7px;
+  border: 1px solid var(--thc-line);
+  border-radius: 5px;
+  background: var(--thc-panel-soft);
+}
+.thc-param-row input {
+  flex: 1;
+  padding: 8px 12px;
+  border: 1px solid var(--thc-line-strong);
+  border-radius: 9px;
+  font-size: 13px;
+  outline: none;
+  background: #fff;
+  color: var(--thc-text-1);
+  font-family: var(--thc-mono);
+  transition: all 0.18s;
+  min-width: 0;
+  box-shadow: 0 1px 2px rgba(16, 24, 40, 0.04);
+}
+.thc-param-row input::placeholder { color: var(--thc-text-3); }
+.thc-param-row input:focus {
+  border-color: rgba(79, 70, 229, 0.55);
+  box-shadow: 0 0 0 3px rgba(79, 70, 229, 0.1);
+}
+
+.thc-result {
+  border-radius: 13px;
+  padding: 15px;
+  font-size: 13px;
+  animation: thc-fade-up 0.3s ease;
+}
+.thc-result.ok {
+  background: rgba(18, 183, 106, 0.05);
+  border: 1px solid rgba(18, 183, 106, 0.28);
+}
+.thc-result.err {
+  background: rgba(240, 68, 56, 0.045);
+  border: 1px solid rgba(240, 68, 56, 0.3);
+}
+.thc-result-head {
+  font-weight: 800;
+  color: var(--thc-text-1);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+.thc-result-ms {
+  font-family: var(--thc-mono);
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--thc-text-2);
+  padding: 2px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--thc-line);
+  background: var(--thc-panel-soft);
+}
+.thc-result-msg { color: var(--thc-text-2); margin-bottom: 8px; line-height: 1.65; }
+.thc-result-err { color: var(--thc-err); margin-bottom: 8px; word-break: break-all; font-family: var(--thc-mono); font-size: 12px; }
+
+/* ──────────────────── 意图试跑 ──────────────────── */
+.thc-intent-row { display: flex; gap: 9px; }
+.thc-intent-input {
+  flex: 1;
+  padding: 9px 14px;
+  border: 1px solid var(--thc-line-strong);
+  border-radius: 10px;
+  font-size: 13px;
+  outline: none;
+  background: #fff;
+  color: var(--thc-text-1);
+  transition: all 0.18s;
+  min-width: 0;
+  box-shadow: 0 1px 2px rgba(16, 24, 40, 0.04);
+}
+.thc-intent-input::placeholder { color: var(--thc-text-3); }
+.thc-intent-input:focus {
+  border-color: rgba(79, 70, 229, 0.55);
+  box-shadow: 0 0 0 3px rgba(79, 70, 229, 0.1);
+}
+.thc-intent-row select {
+  padding: 9px 11px;
+  border: 1px solid var(--thc-line-strong);
+  border-radius: 10px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--thc-text-1);
+  background: #fff;
+  outline: none;
+  cursor: pointer;
+  box-shadow: 0 1px 2px rgba(16, 24, 40, 0.04);
+}
+
+/* 置信度条 */
+.thc-confidence { display: flex; align-items: center; gap: 10px; }
+.thc-confidence-bar {
+  flex: 1;
+  max-width: 220px;
+  height: 7px;
+  border-radius: 999px;
+  background: rgba(71, 84, 103, 0.12);
+  overflow: hidden;
+}
+.thc-confidence-fill {
+  height: 100%;
+  border-radius: 999px;
+  background: var(--thc-grad);
+  box-shadow: 0 1px 4px rgba(79, 70, 229, 0.4);
+  transition: width 0.6s cubic-bezier(0.4, 0, 0.2, 1);
+}
+.thc-confidence-val { font-family: var(--thc-mono); font-size: 12px; font-weight: 700; color: var(--thc-text-2); }
+
+/* 执行计划 */
+.thc-plan { display: flex; flex-direction: column; gap: 7px; margin: 10px 0; }
+.thc-plan-step {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  background: var(--thc-panel-soft);
+  border: 1px solid var(--thc-line);
+  border-radius: 10px;
+  padding: 8px 12px;
+  font-size: 12px;
+  transition: all 0.15s;
+}
+.thc-plan-step:hover { border-color: var(--thc-line-strong); box-shadow: 0 2px 6px rgba(16, 24, 40, 0.06); }
+.thc-plan-no {
+  width: 22px;
+  height: 22px;
+  border-radius: 7px;
+  background: rgba(79, 70, 229, 0.08);
+  border: 1px solid rgba(79, 70, 229, 0.3);
+  color: var(--thc-accent);
+  font-size: 11px;
+  font-family: var(--thc-mono);
+  font-weight: 800;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+.thc-plan-tool { font-weight: 700; color: var(--thc-accent); flex-shrink: 0; font-family: var(--thc-mono); font-size: 12px; }
+.thc-plan-params {
+  color: var(--thc-text-3);
+  font-size: 11px;
+  font-family: var(--thc-mono);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+  text-align: right;
+}
+
+/* ──────────────────── 骨架屏 ──────────────────── */
+.thc-skeleton {
+  flex-shrink: 0;
+  border-radius: 12px;
+  border: 1px solid var(--thc-line);
+  background: #fff;
+  padding: 12px 14px;
+  box-shadow: 0 1px 3px rgba(16, 24, 40, 0.04);
+}
+.thc-skeleton-line {
+  height: 12px;
+  border-radius: 6px;
+  background: linear-gradient(90deg,
+    rgba(71, 84, 103, 0.07) 25%,
+    rgba(71, 84, 103, 0.15) 40%,
+    rgba(71, 84, 103, 0.07) 60%);
+  background-size: 440px 100%;
+  animation: thc-shimmer 1.3s linear infinite;
+  margin-bottom: 9px;
+}
+.thc-skeleton-line:last-child { margin-bottom: 0; }
+.thc-skeleton-line.w60 { width: 60%; }
+.thc-skeleton-line.w85 { width: 85%; }

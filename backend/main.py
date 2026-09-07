@@ -296,6 +296,10 @@ app.add_api_websocket_route("/ws/cesium", cesium_ws_endpoint)
 # 注册 GIS 处理工具路由
 app.include_router(gis_tool_router)
 
+# 注册服务化反向代理（前端控制台 → tool-hub:8011 / intent-service:8010）
+from services.service_proxy import router as service_proxy_router
+app.include_router(service_proxy_router)
+
 bot = None
 task_executor = None
 LLM_CFG = None

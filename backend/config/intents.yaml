@@ -1,0 +1,31 @@
+# intents.yaml — 业务意图目录（意图服务的意图清单 SSOT）
+# 由 agents/intent_types.py 的 INTENT_DESCRIPTIONS 迁移而来。
+# 新增意图：在此加一条；对应工具在其 tools.yaml 条目 intents 字段中引用。
+
+intents:
+  map_display:
+    description: "地图展示类任务：加载矢量数据、切换底图、添加标记等"
+  data_query:
+    description: "数据查询类任务：数据库查询、统计分析、数据对比"
+  knowledge_search:
+    description: "知识检索类任务：政策查询、流程咨询、文档查找"
+  weather_query:
+    description: "天气查询任务：查询城市天气实况、预报、空气质量"
+  data_visualization:
+    description: "数据可视化任务：生成图表、统计可视化"
+  report_generation:
+    description: "报告生成任务：生成正式报告、导出文档"
+  location_search:
+    description: "位置搜索任务：查找地点坐标、地址搜索"
+  coordinate_marker:
+    description: "坐标标注任务：在地图上标注特定坐标点"
+  spatial_processing:
+    description: "空间数据处理任务：坐标投影转换、XY交换、矢量GeoJSON生成与地图加载"
+  spatial_reference:
+    description: "空间参考数据查询：获取河道红线、采区边界等空间参考数据"
+  spatial_analysis:
+    description: "空间分析任务：缓冲区、裁剪、叠加分析、面积计算、分区统计等"
+  cross_intent:
+    description: "跨意图复合任务：涉及多种操作类型的复杂任务"
+  unknown:
+    description: "未知意图：无法明确分类的任务"

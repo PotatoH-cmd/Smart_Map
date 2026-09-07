@@ -11,6 +11,7 @@ import KnowledgeBaseManager from './components/KnowledgeBaseManager';
 import FalconPanel from './components/FalconPanel';
 import TileManager from './components/TileManager';
 import GisPipeline from './components/GisPipeline';
+import ToolHubConsole from './components/ToolHubConsole';
 import RunStatusBar from './components/RunStatusBar';
 import ConfirmationCard from './components/ConfirmationCard';
 import ParameterFormCard from './components/ParameterFormCard';
@@ -1486,11 +1487,17 @@ function App() {
             >
               🛠 GIS工具
             </button>
-            <button 
+            <button
               className={`nav-button ${activeView === 'tiles' ? 'active' : ''}`}
               onClick={() => setActiveView('tiles')}
             >
               🗂️ 切片管理
+            </button>
+            <button
+              className={`nav-button ${activeView === 'toolhub' ? 'active' : ''}`}
+              onClick={() => setActiveView('toolhub')}
+            >
+              🧰 工具中台
             </button>
           </div>
         </div>
@@ -1543,6 +1550,10 @@ function App() {
           {/* GIS工具 — CSS 显隐 */}
           <div style={{ display: activeView === 'gis' ? 'block' : 'none', height: '100%', overflow: 'hidden' }}>
             <GisPipeline />
+          </div>
+          {/* 工具中台 — CSS 显隐 */}
+          <div style={{ display: activeView === 'toolhub' ? 'block' : 'none', height: '100%', overflow: 'hidden' }}>
+            <ToolHubConsole />
           </div>
         </div>
 
