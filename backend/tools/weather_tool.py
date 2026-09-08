@@ -55,7 +55,7 @@ class WeatherTool(BaseTool):
         if not city:
             return {"success": False, "error": "城市名称不能为空"}
 
-        api_key = os.environ.get("WEATHER_API_KEY", "bb183d8bf04a4870be4efe78e7e6337b")
+        api_key = os.environ.get("WEATHER_API_KEY", "")
 
         try:
             result = self._call_qweather(city, forecast_days, include_aqi, api_key)

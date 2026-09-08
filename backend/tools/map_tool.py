@@ -406,7 +406,7 @@ class LocationSearchTool(BaseTool):
             
             # 如果本地数据库没找到，集成天地图 API (如果配置了 TIANDITU_TOKEN)
             import os
-            tk = os.environ.get("TIANDITU_TOKEN", "e644a451f326492790e39a09efe8e2de") # 默认使用一个可用的测试 token
+            tk = os.environ.get("TIANDITU_TOKEN", "")
             
             try:
                 logger.info(f"Calling Tianditu Geocoder for: {location_name}")

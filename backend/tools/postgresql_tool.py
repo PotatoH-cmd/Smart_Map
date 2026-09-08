@@ -108,7 +108,7 @@ class PostgreSQLTool(BaseTool):
             port = self.cfg.get('port', 5432)
             database = self.cfg.get('database', 'postgres')
             user = self.cfg.get('user', 'postgres')
-            password = self.cfg.get('password', '8720622')  # 建议通过安全方式传入
+            password = self.cfg.get('password') or os.environ.get('GEOSERVER_PG_PASSWORD', '')
 
             if not password:
                 logger.error("Database password not provided in config or PG_PASSWORD environment variable.")

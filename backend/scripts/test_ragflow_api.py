@@ -8,10 +8,14 @@
 import os
 import requests
 
+# 从 backend/.env 加载环境变量
+from dotenv import load_dotenv
+load_dotenv(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".env"))
+
 # RagFlow 配置
-RAGFLOW_API_KEY = "ragflow-jZ-6x-X_PGr5ULHFSPqWhfbmd-0xlU_naoGg0hLc3K0"
-RAGFLOW_API_BASE = "http://172.136.16.14:8080/api/v1"
-RAGFLOW_DATASET_ID = "538b0a5c36ff11f18e7d3d43671e73e4"
+RAGFLOW_API_KEY = os.environ["RAGFLOW_API_KEY"]
+RAGFLOW_API_BASE = os.environ["RAGFLOW_API_BASE"]
+RAGFLOW_DATASET_ID = os.environ["RAGFLOW_DATASET_ID"]
 
 def test_list_documents():
     """测试列出文档"""

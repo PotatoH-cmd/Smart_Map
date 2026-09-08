@@ -11,6 +11,7 @@
 # ---------------------------------------------------------------------------
 from qwen_agent.agents import Assistant
 
+from core.config import keys as _cfg_keys
 from prompts import LEGACY_ASSISTANT_SYSTEM_PROMPT
 
 from tools.map_tool import MapTool, LocationSearchTool
@@ -40,7 +41,7 @@ from agents import TaskExecutor
 LEGACY_LLM_CFG = {
     'model': 'qwen-flash-2025-07-28',
     'model_server': 'https://dashscope.aliyuncs.com/compatible-mode/v1',
-    'api_key': 'sk-e4990da94bfb4037be1f755fa586d048',
+    'api_key': _cfg_keys.dashscope_api_key,
     'generate_cfg': {
         'extra_body': {
             'enable_thinking': False,

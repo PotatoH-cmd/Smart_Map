@@ -31,7 +31,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 def ensure_env():
     """确保环境变量已设置"""
     os.environ.setdefault("KNOWLEDGE_BACKEND", "llamaindex")
-    os.environ.setdefault("DASHSCOPE_API_KEY", "sk-e4990da94bfb4037be1f755fa586d048")
+    from dotenv import load_dotenv
+    load_dotenv(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".env"))
 
 
 def cmd_stats():

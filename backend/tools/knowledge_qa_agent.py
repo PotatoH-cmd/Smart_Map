@@ -50,7 +50,7 @@ class KnowledgeQAAgent:
         self.llm = ChatOpenAI(
             model=model_name,
             base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
-            api_key=os.environ.get("DASHSCOPE_API_KEY", "sk-e4990da94bfb4037be1f755fa586d048"),
+            api_key=os.environ.get("DASHSCOPE_API_KEY", ""),
             temperature=0.1,
         )
 

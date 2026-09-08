@@ -11,7 +11,8 @@ import sys
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-os.environ.setdefault('DASHSCOPE_API_KEY', 'sk-e4990da94bfb4037be1f755fa586d048')
+from dotenv import load_dotenv
+load_dotenv(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".env"))
 
 from tools.caisha_report_tool import CaishaReportTool, SITE_TIF_DIR, DEFAULT_TIF
 

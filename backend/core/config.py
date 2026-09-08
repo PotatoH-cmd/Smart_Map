@@ -51,7 +51,26 @@ class PostgisConfig:
         }
 
 
+@dataclass(frozen=True)
+class KeysConfig:
+    """第三方服务密钥（P0 收敛：源码禁止明文，一律经 backend/.env 注入）。
+
+    约定：无生产默认值（secret 不在代码出现）；缺失时显式为空字符串，
+    由调用方在运行时报错，杜绝「默认值即生产密钥」的泄露模式。
+    """
+    dashscope_api_key: str = os.environ.get("DASHSCOPE_API_KEY", "")
+    ragflow_api_key: str = os.environ.get("RAGFLOW_API_KEY", "")
+    ragflow_api_base: str = os.environ.get("RAGFLOW_API_BASE", "")
+    ragflow_dataset_id: str = os.environ.get("RAGFLOW_DATASET_ID", "")
+    dify_knowledge_api_key: str = os.environ.get("DIFY_KNOWLEDGE_API_KEY", "")
+    dify_api_base: str = os.environ.get("DIFY_API_BASE", "")
+    dify_dataset_id: str = os.environ.get("DIFY_DATASET_ID", "")
+    tianditu_token: str = os.environ.get("TIANDITU_TOKEN", "")
+    weather_api_key: str = os.environ.get("WEATHER_API_KEY", "")
+
+
 server = ServerConfig()
 db = DbConfig()
 falcon = FalconConfig()
 postgis = PostgisConfig()
+keys = KeysConfig()

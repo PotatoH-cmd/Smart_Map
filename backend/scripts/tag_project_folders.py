@@ -23,7 +23,8 @@ DEFAULT_PROJECT_NAME = "采砂成果报告"
 def main():
     apply = "--apply" in sys.argv
     os.environ.setdefault("KNOWLEDGE_BACKEND", "llamaindex")
-    os.environ.setdefault("DASHSCOPE_API_KEY", "sk-e4990da94bfb4037be1f755fa586d048")
+    from dotenv import load_dotenv
+    load_dotenv(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".env"))
 
     from tools.llamaindex_knowledge_tool import KnowledgeBaseTool
 

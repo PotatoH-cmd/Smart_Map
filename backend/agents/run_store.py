@@ -17,11 +17,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
-# 与 main.DB_PATH 保持一致；优先环境变量 MAPASSIST_DB_PATH，默认项目 backend/sessions.db
-DEFAULT_DB_PATH = os.environ.get(
-    "MAPASSIST_DB_PATH",
-    os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "sessions.db"),
-)
+# 会话库路径单一来源（core/db → core/config）
+from core.db import DB_PATH as DEFAULT_DB_PATH  # noqa: E402
 
 # 状态机（对齐文章 Run 生命周期）
 RUNNING = "running"

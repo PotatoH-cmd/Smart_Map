@@ -29,7 +29,7 @@ DB_CFG = {
     "port": 5432,
     "dbname": "postgres",
     "user": "postgres",
-    "password": "8720622",
+    "password": os.environ.get("GEOSERVER_PG_PASSWORD", ""),
 }
 
 # 批复采区边界（EPSG:4326，Name 字段为砂场名）

@@ -46,7 +46,7 @@ class SchemaManager:
             "port": db_cfg.get("port", 5432),
             "database": db_cfg.get("database", "postgres"),
             "user": db_cfg.get("user", "postgres"),
-            "password": db_cfg.get("password", "8720622"),
+            "password": db_cfg.get("password") or os.environ.get("GEOSERVER_PG_PASSWORD", ""),
         }
         # 缓存数据
         self._schema_dict: Optional[Dict[str, List[str]]] = None

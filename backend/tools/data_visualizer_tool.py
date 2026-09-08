@@ -35,7 +35,7 @@ class DataVisualizerTool(BaseTool):
     def __init__(self, cfg: Optional[Dict] = None):
         super().__init__(cfg)
         # 从配置或环境变量获取 API Key
-        self.api_key = os.environ.get('DASHSCOPE_API_KEY', 'sk-e4990da94bfb4037be1f755fa586d048')
+        self.api_key = os.environ.get('DASHSCOPE_API_KEY', '')
         self.model = 'qwen-flash-2025-07-28'
         
         # 初始化 PostgreSQLTool
@@ -44,7 +44,7 @@ class DataVisualizerTool(BaseTool):
             'port': 5432,
             'database': 'postgres',
             'user': 'postgres',
-            'password': '8720622'
+            'password': os.environ.get('GEOSERVER_PG_PASSWORD', '')
         })
 
     def call(self, params: Union[str, Dict[str, Any]], **kwargs) -> Dict[str, Any]:

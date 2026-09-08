@@ -3,8 +3,8 @@ import sys
 import os
 import logging
 
-# Add current directory to path so we can import tools
-sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+# Add backend root to path so we can import tools (脚本已移至 backend/scripts)
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from tools.postgresql_tool import PostgreSQLTool
 

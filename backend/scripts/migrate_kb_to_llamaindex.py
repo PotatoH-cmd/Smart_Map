@@ -32,16 +32,12 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import requests
 
 
-# ── RagFlow 配置 ──
-RAGFLOW_API_KEY = os.environ.get(
-    "RAGFLOW_API_KEY", "ragflow-jZ-6x-X_PGr5ULHFSPqWhfbmd-0xlU_naoGg0hLc3K0"
-)
-RAGFLOW_API_BASE = os.environ.get(
-    "RAGFLOW_API_BASE", "http://172.136.16.14:8080/api/v1"
-)
-RAGFLOW_DATASET_ID = os.environ.get(
-    "RAGFLOW_DATASET_ID", "538b0a5c36ff11f18e7d3d43671e73e4"
-)
+# ── RagFlow 配置（值经 backend/.env 注入，源码不落明文）──
+from dotenv import load_dotenv
+load_dotenv(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".env"))
+RAGFLOW_API_KEY = os.environ.get("RAGFLOW_API_KEY", "")
+RAGFLOW_API_BASE = os.environ.get("RAGFLOW_API_BASE", "")
+RAGFLOW_DATASET_ID = os.environ.get("RAGFLOW_DATASET_ID", "")
 
 
 def _ragflow_request(method: str, path: str, **kwargs) -> dict:

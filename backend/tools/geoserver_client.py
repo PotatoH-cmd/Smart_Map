@@ -58,7 +58,7 @@ def get_config() -> Dict[str, Any]:
         "pg_port": _env("GEOSERVER_PG_PORT", "5432"),
         "pg_db": _env("GEOSERVER_PG_DB", "postgres"),
         "pg_user": _env("GEOSERVER_PG_USER", "postgres"),
-        "pg_password": _env("GEOSERVER_PG_PASSWORD", "8720622"),
+        "pg_password": _env("GEOSERVER_PG_PASSWORD", ""),
         "pg_schema_overlay": _env("GEOSERVER_PG_SCHEMA_OVERLAY", "overlay"),
         "pg_schema_business": _env("GEOSERVER_PG_SCHEMA_BUSINESS", "public"),
     }

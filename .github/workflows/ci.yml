@@ -50,3 +50,22 @@ jobs:
       - name: Build
         working-directory: frontend
         run: npm run build
+
+  secret-scan:
+    name: Secret leak scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Scan tracked files for hardcoded secrets
+        run: |
+          set -e
+          # 仅扫 git 追踪文件（.env / frontend/build / node_modules 已被 .gitignore 排除）
+          HITS=$(git ls-files | grep -E '\.(py|js|jsx|ts|json|yaml|yml)$' \
+            | xargs grep -lEn 'sk-[A-Za-z0-9]{20,}|ragflow-[A-Za-z0-9_\-]{16,}|dataset-[A-Za-z0-9]{16,}|eyJ[A-Za-z0-9_\-]{20,}|AKIA[0-9A-Z]{16}|ghp_[A-Za-z0-9]{30,}' 2>/dev/null || true)
+          if [ -n "$HITS" ]; then
+            echo "::error::疑似硬编码密钥被提交，请收敛到 backend/.env 后重试："
+            echo "$HITS"
+            exit 1
+          fi
+          echo "no secrets found in tracked files"

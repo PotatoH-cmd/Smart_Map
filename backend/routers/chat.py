@@ -23,7 +23,7 @@ from core.db import DB_PATH, get_db, now_iso
 # ── OCR / 上传 / SSE 常量（自 main.py 收敛到 chat 域）──
 OCR_MODEL = 'qwen-vl-ocr-2025-11-20'
 OCR_BASE_URL = 'https://dashscope.aliyuncs.com/compatible-mode/v1'
-OCR_API_KEY = 'sk-e4990da94bfb4037be1f755fa586d048'
+OCR_API_KEY = os.environ.get('DASHSCOPE_API_KEY', '')
 UPLOAD_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "static")  # 图片本地兜底目录
 RUN_SSE_IDLE_TIMEOUT = 120  # run SSE 订阅空闲超时：超过该时长无事件则检查 run 状态（防哨兵丢失导致挂起）
 

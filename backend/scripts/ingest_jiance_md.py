@@ -61,7 +61,8 @@ IMG_SRC_RE = re.compile(r'(<img\s+src=")(images/[^"]+)(")')
 
 def ensure_env():
     os.environ.setdefault("KNOWLEDGE_BACKEND", "llamaindex")
-    os.environ.setdefault("DASHSCOPE_API_KEY", "sk-e4990da94bfb4037be1f755fa586d048")
+    from dotenv import load_dotenv
+    load_dotenv(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".env"))
 
 
 def clean_heading(text: str) -> str:

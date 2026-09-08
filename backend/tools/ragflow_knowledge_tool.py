@@ -80,19 +80,10 @@ class KnowledgeBaseTool(BaseTool):
     def __init__(self, cfg: Optional[Dict] = None):
         super().__init__(cfg)
         # RagFlow 配置
-        self.api_key = os.environ.get(
-            'RAGFLOW_API_KEY', 
-            'ragflow-jZ-6x-X_PGr5ULHFSPqWhfbmd-0xlU_naoGg0hLc3K0'
-        )
-        self.api_base = os.environ.get(
-            'RAGFLOW_API_BASE', 
-            'http://172.136.16.14:8080/api/v1'
-        )
+        self.api_key = os.environ.get('RAGFLOW_API_KEY', '')
+        self.api_base = os.environ.get('RAGFLOW_API_BASE', '')
         # 数据集 ID（信阳市智慧巡河报告）
-        self.dataset_id = os.environ.get(
-            'RAGFLOW_DATASET_ID', 
-            '538b0a5c36ff11f18e7d3d43671e73e4'
-        )
+        self.dataset_id = os.environ.get('RAGFLOW_DATASET_ID', '')
 
     def call(self, params: Union[str, Dict[str, Any]], **kwargs) -> Dict[str, Any]:
         """执行工具调用"""

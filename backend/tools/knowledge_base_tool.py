@@ -58,9 +58,9 @@ class KnowledgeBaseTool(BaseTool):
     def __init__(self, cfg: Optional[Dict] = None):
         super().__init__(cfg)
         # Dify 相关配置
-        self.api_key = os.environ.get('DIFY_KNOWLEDGE_API_KEY', 'dataset-ihY2ckUpZezVmydpw8Tix4l1')
-        self.api_base = os.environ.get('DIFY_API_BASE', 'http://172.136.16.52:83/v1')
-        self.dataset_id = os.environ.get('DIFY_DATASET_ID', '5ec0a57c-21be-43b4-8cd3-c34f657c3efe')
+        self.api_key = os.environ.get('DIFY_KNOWLEDGE_API_KEY', '')
+        self.api_base = os.environ.get('DIFY_API_BASE', '')
+        self.dataset_id = os.environ.get('DIFY_DATASET_ID', '')
 
     def call(self, params: Union[str, Dict[str, Any]], **kwargs) -> Dict[str, Any]:
         if isinstance(params, str):

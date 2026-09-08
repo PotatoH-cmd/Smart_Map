@@ -20,7 +20,7 @@ PG_CONFIG = {
     "port": int(os.environ.get("GEOSERVER_PG_PORT", "5432")),
     "database": os.environ.get("GEOSERVER_PG_DB", "postgres"),
     "user": os.environ.get("GEOSERVER_PG_USER", "postgres"),
-    "password": os.environ.get("GEOSERVER_PG_PASSWORD", "8720622"),
+    "password": os.environ.get("GEOSERVER_PG_PASSWORD", ""),
 }
 
 # ── Kuzu 图谱存储路径 ──
@@ -222,7 +222,7 @@ class KnowledgeGraphTool:
         self._llm = ChatOpenAI(
             model=model_name,
             base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
-            api_key=os.environ.get("DASHSCOPE_API_KEY", "sk-e4990da94bfb4037be1f755fa586d048"),
+            api_key=os.environ.get("DASHSCOPE_API_KEY", ""),
             temperature=0.05,
         )
         logger.info("[KG] LLM 已初始化")

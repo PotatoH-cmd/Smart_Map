@@ -117,15 +117,9 @@ class KnowledgeBaseTool(BaseTool):
         self._bm25_cache = None
 
         # RagFlow fallback 配置（用于降级）
-        self._ragflow_api_key = os.environ.get(
-            "RAGFLOW_API_KEY", "ragflow-jZ-6x-X_PGr5ULHFSPqWhfbmd-0xlU_naoGg0hLc3K0"
-        )
-        self._ragflow_api_base = os.environ.get(
-            "RAGFLOW_API_BASE", "http://172.136.16.14:8080/api/v1"
-        )
-        self._ragflow_dataset_id = os.environ.get(
-            "RAGFLOW_DATASET_ID", "538b0a5c36ff11f18e7d3d43671e73e4"
-        )
+        self._ragflow_api_key = os.environ.get("RAGFLOW_API_KEY", "")
+        self._ragflow_api_base = os.environ.get("RAGFLOW_API_BASE", "")
+        self._ragflow_dataset_id = os.environ.get("RAGFLOW_DATASET_ID", "")
 
     # ─────────────────────────────────────────────
     # 延迟初始化

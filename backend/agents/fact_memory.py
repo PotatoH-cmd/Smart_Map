@@ -23,11 +23,8 @@ from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
-# 与 main.DB_PATH / run_store.DEFAULT_DB_PATH 一致，避免循环导入故独立解析
-DB_PATH = os.environ.get(
-    "MAPASSIST_DB_PATH",
-    os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "sessions.db"),
-)
+# 会话库路径单一来源（core/db → core/config）
+from core.db import DB_PATH  # noqa: E402
 
 ENABLED = os.environ.get("FACT_MEMORY_ENABLED", "1") == "1"
 MAX_FACTS = 200            # 全局事实上限

@@ -725,9 +725,9 @@ class ReportGeneratorTool(BaseTool):
             # 尝试导入 RagFlow 知识库工具
             import requests
             
-            api_key = 'ragflow-jZ-6x-X_PGr5ULHFSPqWhfbmd-0xlU_naoGg0hLc3K0'
-            api_base = 'http://172.136.16.14:8080/api/v1'
-            dataset_id = '538b0a5c36ff11f18e7d3d43671e73e4'
+            api_key = os.environ.get('RAGFLOW_API_KEY', '')
+            api_base = os.environ.get('RAGFLOW_API_BASE', '')
+            dataset_id = os.environ.get('RAGFLOW_DATASET_ID', '')
             
             # 调用检索 API
             url = f"{api_base}/retrieval"

@@ -7,7 +7,8 @@ sys.path.insert(0, BACKEND_DIR)
 os.chdir(BACKEND_DIR)
 
 logging.basicConfig(level=logging.WARNING)
-os.environ.setdefault('DASHSCOPE_API_KEY', 'sk-e4990da94bfb4037be1f755fa586d048')
+from dotenv import load_dotenv
+load_dotenv(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".env"))
 
 _rasterio_proj = '/home/server/miniconda3/envs/mapagent6/lib/python3.11/site-packages/rasterio/proj_data'
 if os.path.isdir(_rasterio_proj):

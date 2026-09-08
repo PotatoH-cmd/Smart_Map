@@ -15,7 +15,7 @@ module.exports = {
         // 知识库后端切换为 LlamaIndex
         KNOWLEDGE_BACKEND: "llamaindex",
         LLAMAINDEX_PERSIST_DIR: "./llama_index_storage",
-        DASHSCOPE_API_KEY: "sk-e4990da94bfb4037be1f755fa586d048",
+        // DASHSCOPE_API_KEY 由 main.py load_dotenv(backend/.env) 注入，勿在此重复明文
       },
       autorestart: true,
       restart_delay: 5000,
