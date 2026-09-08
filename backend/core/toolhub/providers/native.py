@@ -26,12 +26,13 @@ DEFAULT_SKIP_MODULES = {
 # ---------------------------------------------------------------------------
 
 def _create_postgresql_tool():
+    from core.config import postgis as _cfg_pg
     from tools.postgresql_tool import PostgreSQLTool
     return PostgreSQLTool(cfg={
-        "host": "172.136.16.52",
-        "port": 5432,
-        "database": "postgres",
-        "user": "postgres",
+        "host": _cfg_pg.host,
+        "port": _cfg_pg.port,
+        "database": _cfg_pg.dbname,
+        "user": _cfg_pg.user,
     })
 
 
@@ -41,7 +42,8 @@ def _create_mcp_postgresql_tool():
 
 
 def _create_knowledge_base_tool():
-    _kb = __import__("os").environ.get("KNOWLEDGE_BACKEND", "ragflow")
+    from core.config import runtime as _cfg_runtime
+    _kb = _cfg_runtime.knowledge_backend
     if _kb == "llamaindex":
         from tools.llamaindex_knowledge_tool import KnowledgeBaseTool
     else:

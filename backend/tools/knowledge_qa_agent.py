@@ -22,8 +22,9 @@ try:
 except ImportError:
     PG_AVAILABLE = False
 
-# 知识库后端自动选择（与 main.py 保持一致）
-_kb_backend = os.environ.get("KNOWLEDGE_BACKEND", "ragflow")
+# 知识库后端自动选择（core.config 单一来源：KNOWLEDGE_BACKEND）
+from core.config import runtime as _cfg_runtime
+_kb_backend = _cfg_runtime.knowledge_backend
 if _kb_backend == "llamaindex":
     from .llamaindex_knowledge_tool import KnowledgeBaseTool
 else:

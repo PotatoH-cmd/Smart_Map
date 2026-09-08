@@ -1,97 +1,31 @@
 """
-AgentHarness — 调度中枢。
-负责：意图路由、Agent 分派、工具加载协调。
-不替代 LangGraph 图，而是作为 TaskExecutor 三个节点的内部实现。
+AgentHarness — 意图分派与提示词工厂（自 main 拆分收敛后的瘦身版）。
+
+职责（生产实际使用面）：
+- try_fast_classify / build_response_prompt_for / get_system_context（TaskExecutor 节点调用）
+- dispatch 按意图懒加载领域 Agent（Map/Data/Knowledge/Report/General）
+
+P1 收敛说明：不再在 __init__ 重复构造 IntentAgent/ToolRegistry
+（这两个由 TaskExecutor 统一持有）；快速路由表统一走 config/fast_route_loader
+（JSON 权威，内置默认兜底），本模块不再维护第二份关键词表。
 """
 import logging
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 
 from .intent_types import IntentType, IntentResult
-from .intent_agent import IntentAgent
 from .base_agent import BaseAgent
-from .tool_registry import ToolRegistry
 from config.fast_route_loader import load_fast_routes
 
 logger = logging.getLogger(__name__)
 
 
-# ── 快速关键词路由表：高频命令绕过 LLM，直接命中意图 ──
-
-FAST_ROUTE_KEYWORDS: List[Tuple[str, IntentType]] = [
-    # 地图操作
-    ("切换卫星", IntentType.MAP_DISPLAY),
-    ("卫星图层", IntentType.MAP_DISPLAY),
-    ("卫星底图", IntentType.MAP_DISPLAY),
-    ("卫星影像", IntentType.MAP_DISPLAY),
-    ("高分影像", IntentType.MAP_DISPLAY),
-    ("街道图", IntentType.MAP_DISPLAY),
-    ("osm", IntentType.MAP_DISPLAY),
-    ("切换底图", IntentType.MAP_DISPLAY),
-    ("加载矢量", IntentType.MAP_DISPLAY),
-    ("加载采区", IntentType.MAP_DISPLAY),
-    ("加载图层", IntentType.MAP_DISPLAY),
-    ("清除地图", IntentType.MAP_DISPLAY),
-    ("清除标记", IntentType.MAP_DISPLAY),
-    ("飞到", IntentType.MAP_DISPLAY),          # 3D 飞行
-    ("飞往", IntentType.MAP_DISPLAY),
-    ("flyto", IntentType.MAP_DISPLAY),
-    # 位置搜索
-    ("查找位置", IntentType.LOCATION_SEARCH),
-    ("搜索位置", IntentType.LOCATION_SEARCH),
-    ("定位", IntentType.LOCATION_SEARCH),
-    # 空间处理
-    ("坐标转换", IntentType.SPATIAL_PROCESSING),
-    ("投影坐标", IntentType.SPATIAL_PROCESSING),
-    ("xy相反", IntentType.SPATIAL_PROCESSING),
-    ("生成矢量", IntentType.SPATIAL_PROCESSING),
-    ("生成面", IntentType.SPATIAL_PROCESSING),
-    ("带号", IntentType.SPATIAL_PROCESSING),
-    ("cgcs2000", IntentType.SPATIAL_PROCESSING),
-    # 红线 / 采区空间参考
-    ("红线", IntentType.SPATIAL_REFERENCE),
-    ("河道红线", IntentType.SPATIAL_REFERENCE),
-    ("管理红线", IntentType.SPATIAL_REFERENCE),
-    ("红线附近", IntentType.SPATIAL_REFERENCE),
-    ("红线范围内", IntentType.SPATIAL_REFERENCE),
-    # 报告生成
-    ("生成报告", IntentType.REPORT_GENERATION),
-    ("出具报告", IntentType.REPORT_GENERATION),
-    ("导出报告", IntentType.REPORT_GENERATION),
-    # 图表
-    ("生成图表", IntentType.DATA_VISUALIZATION),
-    ("画个图", IntentType.DATA_VISUALIZATION),
-    ("柱状图", IntentType.DATA_VISUALIZATION),
-    ("饼图", IntentType.DATA_VISUALIZATION),
-    ("折线图", IntentType.DATA_VISUALIZATION),
-    # 知识检索
-    ("政策", IntentType.KNOWLEDGE_SEARCH),
-    ("规范", IntentType.KNOWLEDGE_SEARCH),
-    ("管理规定", IntentType.KNOWLEDGE_SEARCH),
-    ("技术标准", IntentType.KNOWLEDGE_SEARCH),
-    # 空间分析（QGIS MCP）
-    ("缓冲区", IntentType.SPATIAL_ANALYSIS),
-    ("裁剪", IntentType.SPATIAL_ANALYSIS),
-    ("叠加分析", IntentType.SPATIAL_ANALYSIS),
-    ("面积计算", IntentType.SPATIAL_ANALYSIS),
-    ("空间分析", IntentType.SPATIAL_ANALYSIS),
-    ("相交", IntentType.SPATIAL_ANALYSIS),
-    ("包含", IntentType.SPATIAL_ANALYSIS),
-    ("分区统计", IntentType.SPATIAL_ANALYSIS),
-    ("空间关联", IntentType.SPATIAL_ANALYSIS),
-    ("距离计算", IntentType.SPATIAL_ANALYSIS),
-]
-
-
 class AgentHarness:
-    """调度中枢：管理 Agent 映射、快速路由、工具加载协调。"""
+    """调度中枢：意图分派 + 响应提示词工厂。"""
 
     def __init__(self, llm_cfg: Dict):
         self.llm_cfg = llm_cfg
-        self.tool_registry = ToolRegistry()
-        self.intent_agent = IntentAgent(llm_cfg)
-
-        # 加载快速路由表（JSON 配置优先，回退到硬编码默认值）
+        # 快速路由表（JSON 配置优先，不可用时回退 loader 内置默认）
         self._fast_routes: List[Tuple[str, IntentType]] = load_fast_routes()
 
         # 懒加载 Agent 实例
@@ -148,15 +82,12 @@ class AgentHarness:
         return list(dict.fromkeys(agent.tool_names))  # 去重保序
 
     # ------------------------------------------------------------------
-    # 快速路由
+    # 快速路由（关键词 → IntentType，JSON 权威 + loader 内置默认兜底）
     # ------------------------------------------------------------------
 
     def try_fast_classify(self, user_message: str) -> Optional[IntentType]:
-        """快速关键词匹配。命中返回 IntentType，未命中返回 None。
-
-        优先使用 JSON 配置文件加载的路由表，若配置不可用则回退到 FAST_ROUTE_KEYWORDS。
-        """
-        routes = self._fast_routes or FAST_ROUTE_KEYWORDS
+        """快速关键词匹配。命中返回 IntentType，未命中返回 None。"""
+        routes = self._fast_routes
         msg_lower = user_message.lower().replace(" ", "")
         for keyword, intent in routes:
             if keyword.lower().replace(" ", "") in msg_lower:

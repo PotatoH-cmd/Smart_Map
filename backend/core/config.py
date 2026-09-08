@@ -69,8 +69,15 @@ class KeysConfig:
     weather_api_key: str = os.environ.get("WEATHER_API_KEY", "")
 
 
+@dataclass(frozen=True)
+class RuntimeConfig:
+    """运行时开关（无密钥；供 agents/toolhub/agent_builder 统一读取）。"""
+    knowledge_backend: str = os.environ.get("KNOWLEDGE_BACKEND", "ragflow")
+
+
 server = ServerConfig()
 db = DbConfig()
 falcon = FalconConfig()
 postgis = PostgisConfig()
 keys = KeysConfig()
+runtime = RuntimeConfig()

@@ -3,8 +3,7 @@
 
 设计要点：
 - 首次加载及每次调用 load_fast_routes() 时检查文件 mtime
-- 若 JSON 文件不存在或格式错误，回退到内联默认值（与 agent_harness.FAST_ROUTE_KEYWORDS 保持同步）
-- 默认值始终与 JSON 文件内容同步（JSON 为权威来源）
+- 若 JSON 文件不存在或格式错误，回退到内联默认值（JSON 为权威来源，default 兜底）
 
 注意：为避免触发 agents/__init__.py 的级联导入，IntentType 在函数内部延迟导入。
 """
@@ -22,7 +21,7 @@ def _get_intent_type():
     return IntentType
 
 
-# 内联默认路由表（与 agent_harness.FAST_ROUTE_KEYWORDS 保持同步）
+# 内联默认路由表（JSON 文件 fast_routes.json 为权威来源；本表仅在 JSON 缺失/损坏时兜底）
 # 注意：使用字符串而非 IntentType 枚举值，避免模块级导入触发 agents/__init__.py 级联加载
 _DEFAULT_ROUTES: List[Tuple[str, str]] = [
     ("切换卫星", "map_display"),
@@ -68,6 +67,17 @@ _DEFAULT_ROUTES: List[Tuple[str, str]] = [
     ("规范", "knowledge_search"),
     ("管理规定", "knowledge_search"),
     ("技术标准", "knowledge_search"),
+    # 空间分析（QGIS MCP）
+    ("缓冲区", "spatial_analysis"),
+    ("裁剪", "spatial_analysis"),
+    ("叠加分析", "spatial_analysis"),
+    ("面积计算", "spatial_analysis"),
+    ("空间分析", "spatial_analysis"),
+    ("相交", "spatial_analysis"),
+    ("包含", "spatial_analysis"),
+    ("分区统计", "spatial_analysis"),
+    ("空间关联", "spatial_analysis"),
+    ("距离计算", "spatial_analysis"),
 ]
 
 # JSON 配置文件路径（相对于本文件）

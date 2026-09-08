@@ -6,9 +6,9 @@ from tools.knowledge_graph_tool import get_kg
 import asyncio
 from tools.knowledge_qa_agent import KnowledgeQAAgent
 import os
-# 知识库后端选择（环境变量 KNOWLEDGE_BACKEND: ragflow|llamaindex，默认 ragflow）— 与 main.py 保持一致
-import os as _os
-_KB_BACKEND = _os.environ.get("KNOWLEDGE_BACKEND", "ragflow")
+# 知识库后端选择（core.config 单一来源：KNOWLEDGE_BACKEND: ragflow|llamaindex）
+from core.config import runtime as _cfg_runtime
+_KB_BACKEND = _cfg_runtime.knowledge_backend
 if _KB_BACKEND == "llamaindex":
     from tools.llamaindex_knowledge_tool import KnowledgeBaseTool
 else:

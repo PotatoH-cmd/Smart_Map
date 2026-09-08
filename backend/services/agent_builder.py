@@ -11,15 +11,13 @@
 # ---------------------------------------------------------------------------
 from qwen_agent.agents import Assistant
 
-from core.config import keys as _cfg_keys
+from core.config import keys as _cfg_keys, runtime as _cfg_runtime
 from prompts import LEGACY_ASSISTANT_SYSTEM_PROMPT
 
 from tools.map_tool import MapTool, LocationSearchTool
 from tools.postgresql_tool import PostgreSQLTool
-# 知识库后端选择（环境变量 KNOWLEDGE_BACKEND: ragflow|llamaindex，默认 ragflow）
-import os as _os
-
-_KB_BACKEND = _os.environ.get("KNOWLEDGE_BACKEND", "ragflow")
+# 知识库后端选择（core.config 单一来源：KNOWLEDGE_BACKEND: ragflow|llamaindex）
+_KB_BACKEND = _cfg_runtime.knowledge_backend
 if _KB_BACKEND == "llamaindex":
     from tools.llamaindex_knowledge_tool import KnowledgeBaseTool
 else:
