@@ -549,12 +549,11 @@ async def chat_stream(request: ChatRequest, x_session_id: Optional[str] = Header
                 "message": "请求已提交，后端开始处理。",
             })
 
-            use_intent_agent = os.environ.get("USE_INTENT_AGENT", "true").lower() == "true"
-            run_engine_on = os.environ.get("RUN_ENGINE", "on").lower() in ("1", "on", "true")
-
-            # ── 阶段1新路径：RunEngine（灰度开关 RUN_ENGINE，默认 on）──
-            # run 在独立 asyncio task 中执行，SSE 只是事件订阅者；断线不影响执行
-            if run_engine_on and _main.task_executor is not None and _main.task_executor.run_engine is not None:
+            # ── P1 收敛：SSE 流式仅保留 RunEngine 一条驱动 ──
+            # 原 RUN_ENGINE=off 的 execute_stream 手工编排分支已移除；
+            # 意图链路统一走 RunEngine（run 在独立 asyncio task 执行，断线不影响执行），
+            # 双开关全关才回退 qwen legacy bot。
+            if _main.task_executor is not None and _main.task_executor.run_engine is not None:
                 user_text = raw_user_text or _extract_text_content(messages[-1].get('content', ''))
                 engine = _main.task_executor.run_engine
                 store = engine.store
@@ -652,28 +651,7 @@ async def chat_stream(request: ChatRequest, x_session_id: Optional[str] = Header
                 yield "data: [DONE]\n\n"
                 return
 
-            if use_intent_agent and _main.task_executor is not None:
-                # 旧路径：execute_stream 手动编排（RUN_ENGINE=off 时保留）
-                # 提取纯文本用于 _main.task_executor（它目前只支持字符串 user_message）
-                user_text = _extract_text_content(messages[-1].get('content', ''))
-                async for event in _main.task_executor.execute_stream(
-                    user_message=user_text,
-                    chat_history=messages[:-1],
-                    thread_id=thread_id,
-                ):
-                    if event.get("type") == "final":
-                        result = event.get("result", {})
-                        result["map_commands"] = _optimize_map_commands(user_text, result.get("map_commands", []))
-                        result["charts"] = _optimize_charts(result.get("charts", []))
-                        _persist_chat(thread_id, user_text, result.get("response", ""))
-                        _schedule_fact_extraction(thread_id, user_text, result.get("response", ""))
-                        yield sse_payload({"type": "final", "result": result})
-                    else:
-                        yield sse_payload(event)
-
-                yield "data: [DONE]\n\n"
-                return
-
+            # ── 兜底：RunEngine 不可用（executor 未装配）时回退 qwen legacy bot ──
             response_messages = []
             iteration = 0
             runner = _main.bot
