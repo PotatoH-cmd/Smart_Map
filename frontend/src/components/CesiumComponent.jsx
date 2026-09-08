@@ -1,3 +1,4 @@
+import { riskDiffToRGB } from '../utils/geo'; // 2D/3D 共享风险色标
 /**
  * CesiumComponent.jsx
  * Cesium 3D 地图组件（天地图底图，国内可用）
@@ -625,23 +626,7 @@ function getClickLngLat(viewer, screenPosition) {
   };
 }
 
-function riskDiffToRGB(diff) {
-  if (diff <= -1) return [34, 197, 94];
-  if (diff <= 0) {
-    const s = diff + 1;
-    return [Math.round(34 + (74 - 34) * s), Math.round(197 + (222 - 197) * s), Math.round(94 + (128 - 94) * s)];
-  }
-  const t = Math.min(diff / 4, 1);
-  if (t < 0.4) {
-    const s = t / 0.4;
-    return [Math.round(74 + (250 - 74) * s), Math.round(222 + (204 - 222) * s), Math.round(128 + (21 - 128) * s)];
-  } else if (t < 0.7) {
-    const s = (t - 0.4) / 0.3;
-    return [Math.round(250 + (249 - 250) * s), Math.round(204 + (115 - 204) * s), Math.round(21 + (22 - 21) * s)];
-  }
-  const s = (t - 0.7) / 0.3;
-  return [Math.round(249 + (220 - 249) * s), Math.round(115 + (38 - 115) * s), Math.round(22 + (38 - 22) * s)];
-}
+// 风险色标统一实现移至 src/utils/geo.js（与 MapComponent 共享单一来源）
 
 // 凸包（Graham Scan）
 function convexHull(points) {
