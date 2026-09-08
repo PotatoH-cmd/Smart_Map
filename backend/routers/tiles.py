@@ -11,6 +11,7 @@ from tools import geoserver_client as _gs_client
 from fastapi.responses import StreamingResponse, JSONResponse, Response, FileResponse, HTMLResponse
 import re
 import psycopg2
+from tools.postgresql_tool import PostgreSQLTool  # /api/vector-data 动态矢量加载
 import shutil
 import json
 import contextlib
@@ -23,7 +24,9 @@ import httpx
 import math
 import base64
 import logging
-from main import _PG_CONN, _VT_DIR
+from core.config import postgis as _cfg_postgis
+
+_PG_CONN = _cfg_postgis.as_dict()
 
 
 logger = logging.getLogger(__name__)
@@ -1012,3 +1015,326 @@ async def get_mvt_tile(
     except Exception as e:
         logger.error(f"MVT error: {e}")
         raise HTTPException(status_code=500, detail="生成矢量瓦片失败")
+
+
+
+def _resolve_vector_filter(pg_tool, safe_table_name: str, filter_text: str,
+                           table_cols_lower: dict) -> Optional[str]:
+    """校验 filter 中引用的字段是否存在于目标表。
+
+    - 字段是目标表真实列 → 保留原样；
+    - 目标表是 jsonb 属性表（如 caiqu/hx）且 properties 中存在该键
+      → 改写为 (properties->>'字段')；
+    - 字段既不是列也不在 properties 中 → 丢弃整个 filter（加载全部要素），
+      避免"字段不存在"导致整表查询失败。
+    """
+    refs = re.findall(r'"([A-Za-z_][A-Za-z0-9_]*)"', filter_text or "")
+    resolved = filter_text
+    for field in refs:
+        if field.lower() in table_cols_lower:
+            continue  # 真实列，保留原样
+        if "properties" in table_cols_lower:
+            try:
+                probe = pg_tool.call({
+                    "operation": "query",
+                    "sql": f"SELECT properties ? %s AS has_key FROM {safe_table_name} LIMIT 1",
+                    "params": [field],
+                })
+                row = (probe.get("data") or [{}])[0] if probe.get("success") else {}
+                if row.get("has_key"):
+                    resolved = resolved.replace(
+                        f'"{field}"', f"(properties->>'{field}')"
+                    )
+                    continue
+            except Exception as e:
+                logger.warning(f"Vector API properties probe failed for '{safe_table_name}': {e}")
+        logger.warning(
+            f"Vector API dropping filter for table '{safe_table_name}': "
+            f"field '{field}' not found in columns or properties"
+        )
+        return None
+    return resolved
+
+
+
+@router.get("/api/vector-data")
+async def get_vector_data(
+    table_name: str,
+    geom_col: str = 'geom',
+    properties: str = None,
+    filter: str = None,
+    color_expression: str = None,
+    debug: bool = False
+):
+    """
+    动态获取指定表的 GeoJSON 数据
+    :param table_name: 数据库表名
+    :param geom_col: 几何列名，默认为 'geom'
+    :param properties: 需要包含在 properties 中的字段名，逗号分隔。
+    :param filter: SQL 过滤条件 (WHERE 后的内容，如 "name='xxx'")
+    :param color_expression: SQL 颜色表达式，例如 "CASE WHEN depth < 10 THEN 'red' ELSE 'blue' END"
+    """
+    # 兼容性处理：如果请求的是旧表名 mineable_areas，自动映射到新表 ceshen
+    target_table = table_name.strip().lower()
+    if target_table == 'mineable_areas' or target_table == '"mineable_areas"':
+        logger.info(f"Redirecting table_name from '{table_name}' to 'ceshen'")
+        table_name = 'ceshen'
+
+    try:
+        logger.info(f"Vector API request: table_name={table_name}, geom_col={geom_col}, properties={properties}, filter={filter}, color_expression={color_expression}, debug={debug}")
+        # 安全性校验：允许字母、数字、下划线、双引号、单引号、等号、空格和中文字符
+        # 注意：此处 filter 校验需要比较宽松，但也需防止恶意 SQL 注入
+        if not re.match(r'^[a-zA-Z0-9_"\u4e00-\u9fa5\s\'\.\(\)\=\!\<\>\-\+]+$', table_name):
+            raise HTTPException(status_code=400, detail="无效的表名格式")
+
+        pg_tool = PostgreSQLTool(cfg={
+            'host': '172.136.16.52',
+            'port': 5432,
+            'database': 'postgres',
+            'user': 'postgres',
+        })
+
+        # 修复 color_expression 中的字段引用，增加表别名 t. 以避免字段不存在报错
+        safe_color_expression = color_expression
+        if color_expression:
+            # 匹配双引号中的字段名，例如 "Measured_Depth" -> "t"."Measured_Depth"
+            safe_color_expression = re.sub(r'("([a-zA-Z0-9_]+)")', r'"t".\1', color_expression)
+
+        # 构建属性 JSON 对象
+        if properties:
+            props_list = [p.strip() for p in properties.split(',')]
+            # 确保关键字段始终包含在内，用于前端 Popup 显示（仅限目标表实际存在的字段）
+            essential_fields = [
+                '"Mineable_Area_Name"', '"Measured_Depth"', '"Control_Elevation"',
+                '"Lon_4326"', '"Lat_4326"', '"Year"', '"Mineable_Area_ID"', '"County_District"'
+            ]
+            for field in essential_fields:
+                clean_field = field.replace('"', '')
+                if clean_field.lower() in table_cols_lower and clean_field not in props_list:
+                    # 用表中实际列名（兼容大小写）追加，避免引用不存在的字段导致查询失败
+                    props_list.append(table_cols_lower[clean_field.lower()])
+            
+            # 修复：避免在 f-string 表达式中使用反斜杠
+            formatted_props = []
+            for p in props_list:
+                if not p.startswith('"'):
+                    formatted_props.append(f"'{p}', \"t\".\"{p}\"")
+                else:
+                    clean_p = p.replace('"', '')
+                    formatted_props.append(f"'{clean_p}', \"t\".{p}")
+            
+            props_json = ", ".join(formatted_props)
+            if safe_color_expression:
+                props_json += f", '_style_color', {safe_color_expression}"
+            props_sql = f"json_build_object({props_json})"
+        else:
+            if safe_color_expression:
+                props_sql = f"(row_to_json(t)::jsonb - '{geom_col}' || jsonb_build_object('_style_color', {safe_color_expression}))::json"
+            else:
+                props_sql = f"(row_to_json(t)::jsonb - '{geom_col}')::json"
+
+        safe_table_name = table_name if table_name.startswith('"') else f'"{table_name}"'
+
+        # 查询目标表实际列名，动态决定是否启用经纬度回退（caiqu/hx 等 jsonb 表无 Lon_4326/Lat_4326 列）
+        table_cols_lower = {}
+        try:
+            col_res = pg_tool.call({
+                'operation': 'query',
+                'sql': """
+                    SELECT column_name FROM information_schema.columns
+                    WHERE table_schema = 'public' AND LOWER(table_name) = LOWER(%s)
+                """,
+                'params': [table_name.strip('"')]
+            })
+            if col_res.get('success'):
+                table_cols_lower = {str(r.get('column_name')).lower(): str(r.get('column_name'))
+                                    for r in (col_res.get('data') or []) if r.get('column_name')}
+        except Exception as e:
+            logger.warning(f"Vector API failed to fetch columns for '{table_name}': {e}")
+        has_lonlat = 'lon_4326' in table_cols_lower and 'lat_4326' in table_cols_lower
+        lon_col = table_cols_lower.get('lon_4326') if has_lonlat else None
+        lat_col = table_cols_lower.get('lat_4326') if has_lonlat else None
+        lonlat_case = ""
+        if has_lonlat:
+            lonlat_case = (
+                f'WHEN "{lon_col}" IS NOT NULL AND "{lat_col}" IS NOT NULL THEN\n'
+                f'                                    ST_SetSRID(ST_MakePoint("{lon_col}", "{lat_col}"), 4326)\n'
+            )
+
+        # 处理过滤条件（包含几何或经纬度回退；经纬度回退仅对含经纬度列的表生效）
+        where_geom_valid = f"({geom_col} IS NOT NULL)"
+        if has_lonlat:
+            where_lonlat_valid = f"(\"{lon_col}\" IS NOT NULL AND \"{lat_col}\" IS NOT NULL)"
+            where_clause = f"WHERE ({where_geom_valid} OR {where_lonlat_valid})"
+        else:
+            where_clause = f"WHERE {where_geom_valid}"
+        # 校验 filter 引用的字段是否存在于目标表；不存在时改写到 jsonb properties
+        # 或直接丢弃 filter（加载全部要素），避免"字段不存在"导致整表查询失败。
+        if filter:
+            filter = _resolve_vector_filter(pg_tool, safe_table_name, filter, table_cols_lower)
+        if filter:
+            where_clause += f" AND ({filter})"
+
+        def build_empty_meta(count_filter: str):
+            count_sql = f"SELECT COUNT(*)::int AS cnt FROM {safe_table_name} AS t WHERE {count_filter};"
+            geom_sql = f"SELECT COUNT(*)::int AS cnt FROM {safe_table_name} AS t WHERE ({count_filter}) AND ({geom_col} IS NOT NULL);"
+            geom_valid_sql = f"SELECT COUNT(*)::int AS cnt FROM {safe_table_name} AS t WHERE ({count_filter}) AND ({geom_col} IS NOT NULL AND ST_IsValid({geom_col}));"
+            lonlat_res = {'success': False, 'error': None}
+            if has_lonlat:
+                lonlat_sql = f"SELECT COUNT(*)::int AS cnt FROM {safe_table_name} AS t WHERE ({count_filter}) AND (\"{lon_col}\" IS NOT NULL AND \"{lat_col}\" IS NOT NULL);"
+                lonlat_res = pg_tool.call({'operation': 'query', 'sql': lonlat_sql, 'params': []})
+            count_res = pg_tool.call({'operation': 'query', 'sql': count_sql, 'params': []})
+            geom_res = pg_tool.call({'operation': 'query', 'sql': geom_sql, 'params': []})
+            geom_valid_res = pg_tool.call({'operation': 'query', 'sql': geom_valid_sql, 'params': []})
+            return {
+                "matched_total": (count_res.get("data") or [{}])[0].get("cnt") if count_res.get("success") else None,
+                "geom_total": (geom_res.get("data") or [{}])[0].get("cnt") if geom_res.get("success") else None,
+                "geom_valid_total": (geom_valid_res.get("data") or [{}])[0].get("cnt") if geom_valid_res.get("success") else None,
+                "lonlat_total": (lonlat_res.get("data") or [{}])[0].get("cnt") if lonlat_res.get("success") else None,
+                "matched_total_error": None if count_res.get("success") else count_res.get("error"),
+                "geom_total_error": None if geom_res.get("success") else geom_res.get("error"),
+                "geom_valid_total_error": None if geom_valid_res.get("success") else geom_valid_res.get("error"),
+                "lonlat_total_error": None if lonlat_res.get("success") else lonlat_res.get("error"),
+                "where_clause": where_clause,
+            }
+
+        sql = f"""
+        SELECT json_build_object(
+            'type', 'FeatureCollection',
+            'features', COALESCE(
+                json_agg(
+                    json_build_object(
+                        'type', 'Feature',
+                        'geometry', ST_AsGeoJSON(
+                            CASE 
+                                WHEN {geom_col} IS NOT NULL THEN 
+                                    CASE 
+                                        WHEN ST_SRID({geom_col}) = 0 THEN ST_SetSRID(ST_MakeValid({geom_col}), 4326)
+                                        ELSE ST_MakeValid({geom_col})
+                                    END
+                                {lonlat_case}                                ELSE NULL
+                            END, 6
+                        )::json,
+                        'properties', {props_sql}
+                    )
+                ), 
+                '[]'::json
+            )
+        ) AS geojson
+        FROM {safe_table_name} AS t
+        {where_clause};
+        """
+
+        res = pg_tool.call({'operation': 'query', 'sql': sql, 'params': []})
+        if not res.get('success'):
+            error_msg = res.get('error', '数据库查询失败')
+            logger.warning(f"Vector API query failed for table '{table_name}': {error_msg}")
+            # 优雅降级：返回空 FeatureCollection 而非 500，让前端正常处理
+            return JSONResponse(
+                content={
+                    "type": "FeatureCollection",
+                    "features": [],
+                    "meta": {
+                        "status": "error",
+                        "message": f"数据表 '{table_name}' 查询失败: {error_msg}",
+                        "table_name": table_name,
+                        "applied_filter": filter,
+                    }
+                },
+                headers={"Cache-Control": "public, max-age=60"}
+            )
+        rows = res.get('data') or []
+
+        # 保留失败容错：若两次查询均异常，返回空集合
+
+        if not rows or len(rows) == 0:
+            sql2 = f"""
+            SELECT 
+                ST_AsGeoJSON(
+                    CASE 
+                        WHEN {geom_col} IS NOT NULL THEN 
+                            CASE 
+                                WHEN ST_SRID({geom_col}) = 0 THEN ST_SetSRID(ST_MakeValid({geom_col}), 4326)
+                                ELSE ST_MakeValid({geom_col})
+                            END
+                        {lonlat_case}                        ELSE NULL
+                    END, 6
+                ) AS geom_json,
+                (row_to_json(t)::jsonb - '{geom_col}')::json AS props
+            FROM {safe_table_name} AS t
+            {where_clause};
+            """
+            res2 = pg_tool.call({'operation': 'query', 'sql': sql2, 'params': []})
+            rows2 = res2.get('data') or []
+            features2 = []
+            for r in rows2:
+                gj = r.get("geom_json")
+                if not gj:
+                    continue
+                try:
+                    geom = json.loads(gj)
+                except:
+                    geom = None
+                props = r.get("props") or {}
+                if geom:
+                    features2.append({"type": "Feature", "geometry": geom, "properties": props})
+            if features2:
+                fc = {"type": "FeatureCollection", "features": features2, "meta": {"feature_count": len(features2), "table_name": table_name, "applied_filter": filter}}
+                if debug:
+                    fc["_debug"] = {"sql": sql2}
+                return JSONResponse(content=fc, headers={"Cache-Control": "public, max-age=60"})
+            count_filter = f"({filter})" if filter else "TRUE"
+            meta = build_empty_meta(count_filter)
+            logger.info(f"Vector query returned no rows: table={table_name}, filter={filter}, meta={meta}")
+            content = {
+                "type": "FeatureCollection",
+                "features": [],
+                "meta": {
+                    "status": "empty",
+                    "message": "查询成功但无可用要素",
+                    "applied_filter": filter,
+                    "table_name": table_name,
+                    **meta
+                }
+            }
+            if debug:
+                content["_debug"] = {"sql": sql, **meta}
+            return JSONResponse(content=content, headers={"Cache-Control": "public, max-age=60"})
+
+        geojson = rows[0].get('geojson')
+        if isinstance(geojson, str):
+            try:
+                geojson = json.loads(geojson)
+            except Exception as e:
+                logger.error(f"Vector API returned invalid JSON string: {e}")
+                geojson = {"type": "FeatureCollection", "features": [], "meta": {"status": "invalid", "message": "后端返回数据格式异常"}}
+        if not isinstance(geojson, dict):
+            logger.error(f"Vector API returned non-dict geojson: {type(geojson)}")
+            geojson = {"type": "FeatureCollection", "features": [], "meta": {"status": "invalid", "message": "后端返回数据格式异常"}}
+        features = geojson.get("features")
+        if not isinstance(features, list):
+            features = []
+            geojson["features"] = features
+        feature_count = len(features)
+        meta = geojson.get("meta") if isinstance(geojson.get("meta"), dict) else {}
+        meta.update({"feature_count": feature_count, "table_name": table_name, "applied_filter": filter})
+        geojson["meta"] = meta
+        if feature_count == 0:
+            count_filter = f"({filter})" if filter else "TRUE"
+            empty_meta = build_empty_meta(count_filter)
+            meta.update({"status": "empty", "message": "查询成功但无可用要素", **empty_meta})
+            logger.info(f"Vector query returned empty features: table={table_name}, filter={filter}, meta={empty_meta}")
+            if debug:
+                geojson["_debug"] = {"sql": sql, **empty_meta}
+        elif debug:
+            geojson["_debug"] = {"sql": sql, "where_clause": where_clause}
+        return JSONResponse(
+            content=geojson,
+            headers={"Cache-Control": "public, max-age=60"}
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception(f"Vector API error for table {table_name}")
+        raise HTTPException(status_code=500, detail=f"服务器内部错误: {str(e)}")

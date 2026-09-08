@@ -17,8 +17,44 @@ from agents.run_store import get_run_store
 import contextlib
 import re
 import logging
-import main as _main
-from main import DB_PATH, OCR_API_KEY, OCR_BASE_URL, OCR_MODEL, RUN_SSE_IDLE_TIMEOUT, UPLOAD_DIR, _is_explicit_map_request, _is_explicit_marker_request, _stable_json_key, get_db, now_iso
+import main as _main  # 仅访问 lifespan 装配的单例：_main.task_executor / _main.bot
+from core.db import DB_PATH, get_db, now_iso
+
+# ── OCR / 上传 / SSE 常量（自 main.py 收敛到 chat 域）──
+OCR_MODEL = 'qwen-vl-ocr-2025-11-20'
+OCR_BASE_URL = 'https://dashscope.aliyuncs.com/compatible-mode/v1'
+OCR_API_KEY = 'sk-e4990da94bfb4037be1f755fa586d048'
+UPLOAD_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "static")  # 图片本地兜底目录
+RUN_SSE_IDLE_TIMEOUT = 120  # run SSE 订阅空闲超时：超过该时长无事件则检查 run 状态（防哨兵丢失导致挂起）
+
+
+def _is_explicit_map_request(user_content: str) -> bool:
+    if not user_content:
+        return False
+    map_terms = [
+        "地图", "上图", "加载", "图层", "定位", "跳转", "飞到", "显示到地图",
+        "加载到地图", "标记", "标注", "打点", "落点", "经纬度", "卫星图", "底图",
+        "切换", "卫星", "清除",
+        # qgis_mcp_tool 产出结果也需要地图展示
+        "中心点", "缓冲区", "buffer", "裁剪", "clip",
+        # 空间分析类结果也需要地图展示
+        "距离", "连线", "最近", "最短", "多远",
+    ]
+    return any(term in user_content for term in map_terms)
+
+
+def _is_explicit_marker_request(user_content: str) -> bool:
+    if not user_content:
+        return False
+    marker_terms = ["标记", "标注", "打点", "落点", "经纬度", "坐标点"]
+    return any(term in user_content for term in marker_terms)
+
+
+def _stable_json_key(payload: Any) -> str:
+    try:
+        return json.dumps(payload, ensure_ascii=False, sort_keys=True)
+    except Exception:
+        return str(payload)
 
 
 logger = logging.getLogger(__name__)

@@ -9,7 +9,24 @@ from fastapi.responses import StreamingResponse, JSONResponse, Response, FileRes
 from tools.overlay_tile_service import get_tile_png as _overlay_get_tile_png, list_layers as _overlay_list_layers, query_feature as _overlay_query_feature, register_layer as _overlay_register_layer, unregister_layer as _overlay_unregister_layer
 import re
 import logging
-from main import _GEOLIBRE_STYLE, _VT_DIR
+# GeoLibre 图层工作台默认样式（与 GeoLibre 项目 schema 对齐）
+_GEOLIBRE_STYLE = {
+    "minZoom": 0, "maxZoom": 24,
+    "fillColor": "#1d4ed8", "strokeColor": "#1e3a8a", "strokeWidth": 2, "fillOpacity": 0.25,
+    "circleRadius": 6, "textColor": "#111827", "textHaloColor": "#ffffff",
+    "textHaloWidth": 2, "textSize": 16,
+    "extrusionEnabled": False, "extrusionColor": "#3b82f6", "extrusionOpacity": 0.8,
+    "extrusionHeightProperty": "height", "extrusionHeightScale": 1, "extrusionBase": 0,
+    "extrusionAdvancedStyleEnabled": False, "extrusionColorExpression": "",
+    "extrusionHeightExpression": "", "vectorStyleMode": "single", "vectorStyleProperty": "",
+    "vectorStyleClassCount": 5, "vectorStyleColorRamp": "viridis",
+    "vectorStyleClassificationScheme": "equal-interval",
+    "vectorStyleStops": [{"value": 0, "color": "#dbeafe"}, {"value": 1, "color": "#2563eb"}],
+    "vectorStyleExpression": "", "pointRenderer": "single",
+    "heatmapRadius": 30, "heatmapIntensity": 1, "clusterRadius": 50, "clusterMaxZoom": 14,
+    "rasterBrightnessMin": 0, "rasterBrightnessMax": 1, "rasterSaturation": 0,
+    "rasterContrast": 0, "rasterHueRotate": 0,
+}
 
 
 logger = logging.getLogger(__name__)

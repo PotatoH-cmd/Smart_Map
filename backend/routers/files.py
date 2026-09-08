@@ -11,7 +11,16 @@ import uuid
 import tempfile
 import subprocess
 import logging
-from main import GEOJSON_DIR, REQUIRED_SHP_EXTENSIONS, SHP_UPLOAD_DIR, UPLOAD_IMAGES_DIR
+
+# ── 文件域目录常量（自 main.py 收敛，目录均相对 backend 根解析）──
+_BACKEND_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+UPLOAD_IMAGES_DIR = os.path.join(_BACKEND_DIR, "static", "uploads")  # 聊天多模态图片上传
+GEOJSON_DIR = os.path.join(_BACKEND_DIR, "static", "geojson")        # 前端矢量图层 GeoJSON
+SHP_UPLOAD_DIR = os.path.join(os.path.dirname(_BACKEND_DIR), "GIS", "uploads")  # SHP 上传（原 /home/server/python/GIS/uploads）
+os.makedirs(UPLOAD_IMAGES_DIR, exist_ok=True)
+os.makedirs(SHP_UPLOAD_DIR, exist_ok=True)
+
+REQUIRED_SHP_EXTENSIONS = {".shp", ".dbf", ".shx"}
 
 
 logger = logging.getLogger(__name__)

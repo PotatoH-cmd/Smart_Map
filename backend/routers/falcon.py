@@ -10,7 +10,12 @@ import uuid
 import subprocess
 import shutil
 import logging
-from main import FALCON_SERVICE_URL, _FALCON_PYTHON_BIN, _FALCON_SCRIPT_PATH
+from core.config import falcon as _cfg_falcon
+
+# Falcon 目标识别：检测脚本 + 常驻推理服务
+_FALCON_SCRIPT_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "tools", "falcon_detect.py")
+_FALCON_PYTHON_BIN = _cfg_falcon.python_bin
+FALCON_SERVICE_URL = _cfg_falcon.service_url
 
 
 logger = logging.getLogger(__name__)
