@@ -205,7 +205,7 @@ def test_compress_history_llm_failure_degrades():
 
 def test_budget_constants():
     assert cm.BUDGET_WORKSPACE_CHARS == 800
-    assert cm.BUDGET_HISTORY_TURNS == 6
-    assert cm.BUDGET_HISTORY_PER_MSG == 100
+    assert cm.BUDGET_HISTORY_TURNS == 8
+    assert cm.BUDGET_HISTORY_PER_MSG == 160
     assert cm.BUDGET_TOOL_RESULTS_CHARS == 4000
     assert cm.COMPRESS_THRESHOLD_TURNS == 12
