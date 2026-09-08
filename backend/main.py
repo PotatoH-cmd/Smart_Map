@@ -163,13 +163,15 @@ if __name__ == "__main__":
     _sys.modules.setdefault("main", _sys.modules["__main__"])
 
 from routers.chat import router as chat_router  # noqa: E402
-from routers.files import router as files_router  # noqa: E402
-from routers.geolibre import router as geolibre_router  # noqa: E402
-from routers.tiles import router as tiles_router  # noqa: E402
-from routers.geoserver import router as geoserver_router  # noqa: E402
-from routers.knowledge import router as knowledge_router  # noqa: E402
-from routers.memory import router as memory_router  # noqa: E402
-from routers.falcon import router as falcon_router  # noqa: E402
+from routers.files import router as files_router
+from routers.geolibre import router as geolibre_router
+from routers.tiles import router as tiles_router
+from routers.geoserver import router as geoserver_router
+from routers.knowledge import router as knowledge_router
+from routers.memory import router as memory_router
+from routers.falcon import router as falcon_router
+from routers.runs import router as runs_router
+from routers.sessions import router as sessions_router
 
 app.include_router(chat_router)
 app.include_router(files_router)
@@ -179,6 +181,8 @@ app.include_router(geoserver_router)
 app.include_router(knowledge_router)
 app.include_router(memory_router)
 app.include_router(falcon_router)
+app.include_router(runs_router)
+app.include_router(sessions_router)
 
 # 模块加载时自动注册已有 3D Tiles 数据集与自定义栅格图层
 from services.tile_manager import _auto_register_existing_3dtiles_async  # noqa: E402
