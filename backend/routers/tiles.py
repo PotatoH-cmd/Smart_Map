@@ -1100,6 +1100,34 @@ async def get_vector_data(
             # 匹配双引号中的字段名，例如 "Measured_Depth" -> "t"."Measured_Depth"
             safe_color_expression = re.sub(r'("([a-zA-Z0-9_]+)")', r'"t".\1', color_expression)
 
+        safe_table_name = table_name if table_name.startswith('"') else f'"{table_name}"'
+
+        # 查询目标表实际列名，动态决定是否启用经纬度回退（caiqu/hx 等 jsonb 表无 Lon_4326/Lat_4326 列）
+        table_cols_lower = {}
+        try:
+            col_res = pg_tool.call({
+                'operation': 'query',
+                'sql': """
+                    SELECT column_name FROM information_schema.columns
+                    WHERE table_schema = 'public' AND LOWER(table_name) = LOWER(%s)
+                """,
+                'params': [table_name.strip('"')]
+            })
+            if col_res.get('success'):
+                table_cols_lower = {str(r.get('column_name')).lower(): str(r.get('column_name'))
+                                    for r in (col_res.get('data') or []) if r.get('column_name')}
+        except Exception as e:
+            logger.warning(f"Vector API failed to fetch columns for '{table_name}': {e}")
+        has_lonlat = 'lon_4326' in table_cols_lower and 'lat_4326' in table_cols_lower
+        lon_col = table_cols_lower.get('lon_4326') if has_lonlat else None
+        lat_col = table_cols_lower.get('lat_4326') if has_lonlat else None
+        lonlat_case = ""
+        if has_lonlat:
+            lonlat_case = (
+                f'WHEN "{lon_col}" IS NOT NULL AND "{lat_col}" IS NOT NULL THEN\n'
+                f'                                    ST_SetSRID(ST_MakePoint("{lon_col}", "{lat_col}"), 4326)\n'
+            )
+
         # 构建属性 JSON 对象
         if properties:
             props_list = [p.strip() for p in properties.split(',')]
@@ -1132,34 +1160,6 @@ async def get_vector_data(
                 props_sql = f"(row_to_json(t)::jsonb - '{geom_col}' || jsonb_build_object('_style_color', {safe_color_expression}))::json"
             else:
                 props_sql = f"(row_to_json(t)::jsonb - '{geom_col}')::json"
-
-        safe_table_name = table_name if table_name.startswith('"') else f'"{table_name}"'
-
-        # 查询目标表实际列名，动态决定是否启用经纬度回退（caiqu/hx 等 jsonb 表无 Lon_4326/Lat_4326 列）
-        table_cols_lower = {}
-        try:
-            col_res = pg_tool.call({
-                'operation': 'query',
-                'sql': """
-                    SELECT column_name FROM information_schema.columns
-                    WHERE table_schema = 'public' AND LOWER(table_name) = LOWER(%s)
-                """,
-                'params': [table_name.strip('"')]
-            })
-            if col_res.get('success'):
-                table_cols_lower = {str(r.get('column_name')).lower(): str(r.get('column_name'))
-                                    for r in (col_res.get('data') or []) if r.get('column_name')}
-        except Exception as e:
-            logger.warning(f"Vector API failed to fetch columns for '{table_name}': {e}")
-        has_lonlat = 'lon_4326' in table_cols_lower and 'lat_4326' in table_cols_lower
-        lon_col = table_cols_lower.get('lon_4326') if has_lonlat else None
-        lat_col = table_cols_lower.get('lat_4326') if has_lonlat else None
-        lonlat_case = ""
-        if has_lonlat:
-            lonlat_case = (
-                f'WHEN "{lon_col}" IS NOT NULL AND "{lat_col}" IS NOT NULL THEN\n'
-                f'                                    ST_SetSRID(ST_MakePoint("{lon_col}", "{lat_col}"), 4326)\n'
-            )
 
         # 处理过滤条件（包含几何或经纬度回退；经纬度回退仅对含经纬度列的表生效）
         where_geom_valid = f"({geom_col} IS NOT NULL)"

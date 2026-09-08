@@ -11,6 +11,7 @@ import uuid
 import tempfile
 import subprocess
 import logging
+from datetime import datetime
 
 # ── 文件域目录常量（自 main.py 收敛，目录均相对 backend 根解析）──
 _BACKEND_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -44,7 +45,7 @@ async def save_screenshot(payload: ScreenshotRequest):
         image_bytes = base64.b64decode(payload.image_data.split(",", 1)[1])
     except Exception:
         raise HTTPException(status_code=400, detail="图片解码失败")
-    directory = "/home/server/python/map_assistant_v1/backend/static/screenshots"
+    directory = os.path.join(_BACKEND_DIR, "static", "screenshots")
     os.makedirs(directory, exist_ok=True)
     base_name = payload.file_name or f"map_screenshot_{datetime.now().strftime('%Y%m%d_%H%M%S')}.{ext}"
     safe_name = re.sub(r"[^a-zA-Z0-9._-]", "_", base_name)
@@ -59,7 +60,7 @@ async def save_screenshot(payload: ScreenshotRequest):
 async def download_report(filename: str):
     """强制触发浏览器下载报告文件（带 Content-Disposition: attachment）"""
     safe_name = re.sub(r"[^a-zA-Z0-9._-]", "_", filename)
-    file_path = f"/home/server/python/map_assistant_v1/backend/static/reports/{safe_name}"
+    file_path = os.path.join(_BACKEND_DIR, "static", "reports", safe_name)
     if not os.path.exists(file_path):
         raise HTTPException(status_code=404, detail=f"报告文件不存在: {safe_name}")
     return FileResponse(
@@ -72,7 +73,7 @@ async def download_report(filename: str):
 async def download_report_query(filename: str = Query(..., description="报告文件名")):
     """通过 query 参数传递文件名，URL 不含 .docx 后缀，避免迅雷下载管理器拦截"""
     safe_name = re.sub(r"[^a-zA-Z0-9._-]", "_", filename)
-    file_path = f"/home/server/python/map_assistant_v1/backend/static/reports/{safe_name}"
+    file_path = os.path.join(_BACKEND_DIR, "static", "reports", safe_name)
     if not os.path.exists(file_path):
         raise HTTPException(status_code=404, detail=f"报告文件不存在: {safe_name}")
     return FileResponse(
@@ -86,7 +87,7 @@ async def preview_report(filename: str = Query(..., description="报告文件名
     """将 docx 报告转为 HTML 在线预览"""
     import mammoth
     safe_name = re.sub(r"[^a-zA-Z0-9._-]", "_", filename)
-    file_path = f"/home/server/python/map_assistant_v1/backend/static/reports/{safe_name}"
+    file_path = os.path.join(_BACKEND_DIR, "static", "reports", safe_name)
     if not os.path.exists(file_path):
         raise HTTPException(status_code=404, detail=f"报告文件不存在: {safe_name}")
     try:
