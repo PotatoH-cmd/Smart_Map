@@ -15,11 +15,16 @@ module.exports = {
         // 知识库后端切换为 LlamaIndex
         KNOWLEDGE_BACKEND: "llamaindex",
         LLAMAINDEX_PERSIST_DIR: "./llama_index_storage",
+        // 确定性检索：消除 Agent Search 的 LLM 变体/评估随机性，同 query 结果可复现
+        KB_DETERMINISTIC: "1",
         // DASHSCOPE_API_KEY 由 main.py load_dotenv(backend/.env) 注入，勿在此重复明文
       },
       autorestart: true,
       restart_delay: 5000,
       max_restarts: 10,
+      // 报告生成等重型任务（大影像裁剪 + 知识库索引）内存峰值可达 3~5GB，
+      // 默认 2GB 上限会触发 OOM 重启中断任务；机器内存充足（500GB+），放宽到 8G。
+      max_memory_restart: "8G",
       out_file: "/home/server/python/map_assistant_v1/backend/pm2_out.log",
       error_file: "/home/server/python/map_assistant_v1/backend/pm2_err.log",
       merge_logs: true,

@@ -28,6 +28,8 @@ from urllib.parse import quote, urlencode
 
 import requests
 
+from core import db_schema as DB
+
 try:
     import psycopg2
 except Exception:
@@ -833,12 +835,12 @@ def publish_by_tm_key(layer_key: str, layer_meta: Dict[str, Any]) -> Dict[str, A
         ensure_postgis_store(store, schema)
         _publish_postgis_featuretype(store, layer_key, layer_key, srs="EPSG:4326")
         published = layer_key
-    elif layer_key == "ceshen":
-        schema = _resolve_postgis_schema("ceshen", [cfg["pg_schema_business"], cfg["pg_schema_overlay"]])
+    elif layer_key == DB.TABLE_CESHEN:
+        schema = _resolve_postgis_schema(DB.TABLE_CESHEN, [cfg["pg_schema_business"], cfg["pg_schema_overlay"]])
         store = _postgis_store_name(schema)
         ensure_postgis_store(store, schema)
-        _publish_postgis_featuretype(store, "ceshen", "ceshen", srs="EPSG:4326")
-        published = "ceshen"
+        _publish_postgis_featuretype(store, DB.TABLE_CESHEN, DB.TABLE_CESHEN, srs="EPSG:4326")
+        published = DB.TABLE_CESHEN
     elif type_ == "drone":
         if not source_path or not os.path.isfile(source_path):
             # MBTiles 也走 GeoTIFF 路径不可行；要求先有 _3857.tif

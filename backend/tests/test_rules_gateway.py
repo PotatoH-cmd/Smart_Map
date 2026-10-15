@@ -54,7 +54,14 @@ def test_check_aggregate_zero_skips_non_dict_rows():
 
 
 def test_check_kb_content_empty():
+    """回归：knowledge_base_tool 的结果在 data 里（不写 content）。
+
+    历史缺陷：只读 content → 任何知识库步骤都被判"未返回有效内容"（前端时间线误报）。
+    """
     from agents.validators.db_validators import check_kb_content_empty
+    assert check_kb_content_empty({"success": True, "data": [{"content": "切片"}]}, {}) == []
+    assert check_kb_content_empty({"success": True, "data": [], "count": 0}, {})[0].code == "kb_empty"
+    assert check_kb_content_empty({"success": True, "data": None, "content": ""}, {})[0].code == "kb_empty"
     checks = check_kb_content_empty({"success": True, "content": "  "}, {})
     assert checks[0].code == "kb_empty"
     assert checks[0].severity == RISK_CRITICAL

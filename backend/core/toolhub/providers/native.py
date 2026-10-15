@@ -81,6 +81,7 @@ def scan_tool_classes(skip_modules: Optional[set] = None) -> Dict[str, type]:
     from qwen_agent.tools.base import TOOL_REGISTRY
     before = set(TOOL_REGISTRY.keys())
 
+    imported_mods = set()
     for m in pkgutil.iter_modules(tools_pkg.__path__):
         if not (m.name.endswith("_tool") or m.name == "map_tool"):
             continue
@@ -88,19 +89,25 @@ def scan_tool_classes(skip_modules: Optional[set] = None) -> Dict[str, type]:
             continue
         try:
             importlib.import_module(f"tools.{m.name}")
+            imported_mods.add(f"tools.{m.name}")
         except Exception as e:
             logger.warning(f"[toolhub] Skip native module tools.{m.name}: {e}")
             continue
 
-    ours = {name: cls for name, cls in dict(TOOL_REGISTRY).items() if name not in before}
+    # 幂等扫描：重复调用时模块已缓存（import 不产生新注册），差集为空；
+    # 因此以"类来源模块 ∈ 本轮扫描模块"兜底识别本项目工具，避免第二次调用返回空目录。
+    ours = {
+        name: cls for name, cls in dict(TOOL_REGISTRY).items()
+        if name not in before or getattr(cls, "__module__", "") in imported_mods
+    }
 
-    # knowledge_base_tool 由工厂按 env 选择实现（跳过列表内模块），单独补注册
+    # knowledge_base_tool 由工厂按 env 选择实现（跳过列表内模块），单独补注册（同幂等语义）
     try:
         _kb = __import__("os").environ.get("KNOWLEDGE_BACKEND", "ragflow")
         mod = "tools.llamaindex_knowledge_tool" if _kb == "llamaindex" else "tools.ragflow_knowledge_tool"
         importlib.import_module(mod)
         for name, cls in dict(TOOL_REGISTRY).items():
-            if name not in ours:
+            if name not in ours and getattr(cls, "__module__", "") == mod:
                 ours[name] = cls
     except Exception as e:
         logger.warning(f"[toolhub] knowledge_base_tool class unavailable: {e}")
@@ -110,17 +117,13 @@ def scan_tool_classes(skip_modules: Optional[set] = None) -> Dict[str, type]:
 
 
 def _class_meta(cls: type) -> Tuple[str, List[Dict[str, Any]]]:
+    """工具类属性 → (description, parameters 列表)。
+
+    归一化逻辑收敛到 param_validate.normalize_parameters（与参数校验/JSON Schema 单一来源）。
+    """
     desc = str(getattr(cls, "description", "") or "").strip()
-    raw = getattr(cls, "parameters", []) or []
-    if isinstance(raw, dict):
-        # 个别工具 parameters 为 JSON-Schema 风格 dict → 转列表
-        if "properties" in raw:
-            required = set(raw.get("required") or [])
-            raw = [{"name": n, **(p if isinstance(p, dict) else {}), "required": n in required}
-                   for n, p in (raw.get("properties") or {}).items()]
-        else:
-            raw = []
-    params = [p for p in raw if isinstance(p, dict)]
+    from ..param_validate import normalize_parameters
+    params = normalize_parameters(getattr(cls, "parameters", []) or [])
     return desc, params
 
 

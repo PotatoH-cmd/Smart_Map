@@ -4,6 +4,7 @@ MapAgent — 地图操作专职 Agent。
 """
 from typing import List
 
+from core import db_schema as DB
 from .intent_types import IntentType
 from .base_agent import BaseAgent
 
@@ -65,7 +66,7 @@ class MapAgent(BaseAgent):
    - 执行计划：① spatial_reference_tool 获取几何 → ② 将几何传给 postgresql_tool(spatial_query) 做空间筛选
    - **极其重要的区分**：上述规则仅适用于"获取边界/做空间筛选"场景；
      若用户问"XX可采区/砂场的（控制开采）高程/深度/数量是多少"，这是数值数据查询，
-     必须判为 data_query 并用 postgresql_tool 查 ceshen 表，严禁直接编造数值作答。
+     必须判为 data_query 并用 postgresql_tool 查 {DB.TABLE_CESHEN} 表，严禁直接编造数值作答。
 
 5. ⭐ `qgis_mcp_tool`（QGIS空间分析引擎）—— 处理已有图层的空间运算：
    参数格式：{{"category": "analysis", "action": "buffer", "params": {{"distance": 100, "output_path": "/output/result.geojson"}}}}

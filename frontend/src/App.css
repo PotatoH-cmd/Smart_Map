@@ -493,6 +493,54 @@ body {
   margin-bottom: 0;
 }
 
+/* ── 知识库溯源引用卡片 ── */
+.kb-sources {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px dashed rgba(14, 165, 183, 0.35);
+}
+.kb-sources-title {
+  font-size: 12px;
+  color: #0369a1;
+  font-weight: 600;
+  margin-bottom: 6px;
+}
+.kb-source-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  background: rgba(14, 165, 183, 0.08);
+  border: 1px solid rgba(14, 165, 183, 0.25);
+  border-radius: 8px;
+  padding: 6px 10px;
+  margin-bottom: 6px;
+  text-decoration: none;
+  transition: background 0.15s ease, border-color 0.15s ease;
+  min-width: 0;
+}
+.kb-source-item:hover {
+  background: rgba(14, 165, 183, 0.16);
+  border-color: #0ea5b7;
+}
+.kb-source-doc {
+  font-size: 13px;
+  color: #0c4a6e;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 100%;
+}
+.kb-source-sec {
+  font-size: 11px;
+  color: #64748b;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 100%;
+}
+
 .message-text ul,
 .message-text ol {
   margin: 0 0 6px 0;
@@ -1396,153 +1444,267 @@ body {
   padding: 16px 0;
 }
 
-/* ====== 流式状态卡片 ====== */
+/* ====== 流式状态卡片 · 时间线风格 ====== */
 .stream-progress-list {
+  position: relative;
   display: flex;
   flex-direction: column;
-  gap: 6px;
-  margin-top: 4px;
+  gap: 10px;
+  margin: 10px 0 4px 6px;
+  padding-left: 26px;
+}
+
+/* 左侧渐变时间线轨道 */
+.stream-progress-list::before {
+  content: '';
+  position: absolute;
+  left: 9px;
+  top: 8px;
+  bottom: 10px;
+  width: 2px;
+  border-radius: 2px;
+  background: linear-gradient(180deg, rgba(129, 140, 248, 0.55), rgba(14, 165, 183, 0.5) 60%, rgba(14, 165, 183, 0.06));
 }
 
 .stream-progress-card {
-  background: #ffffff;
-  border: 1px solid #e5e7eb;
-  border-radius: 10px;
-  padding: 9px 12px 8px;
+  position: relative;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.96), rgba(250, 251, 253, 0.9));
+  border: 1px solid rgba(148, 163, 184, 0.22);
+  border-radius: 12px;
+  padding: 10px 14px;
   font-size: 12.5px;
-  line-height: 1.5;
-  animation: spcFadeIn 0.22s ease;
-  transition: background 0.2s;
+  line-height: 1.55;
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04), 0 4px 14px rgba(15, 23, 42, 0.05);
+  backdrop-filter: blur(6px);
+  animation: spcFadeIn 0.3s cubic-bezier(0.22, 0.8, 0.36, 1) backwards;
+  transition: box-shadow 0.25s ease, border-color 0.25s ease;
 }
 
+.stream-progress-card:nth-child(2) { animation-delay: 0.04s; }
+.stream-progress-card:nth-child(3) { animation-delay: 0.08s; }
+.stream-progress-card:nth-child(4) { animation-delay: 0.12s; }
+
 @keyframes spcFadeIn {
-  from { opacity: 0; transform: translateY(4px); }
-  to   { opacity: 1; transform: translateY(0); }
+  from { opacity: 0; transform: translateX(-8px); }
+  to   { opacity: 1; transform: translateX(0); }
+}
+
+/* 时间线节点 */
+.spc-node {
+  position: absolute;
+  left: -26px;
+  top: 12px;
+  width: 20px;
+  height: 20px;
+  margin-left: -10px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  font-weight: 700;
+  background: #fff;
+  color: #fff;
+  border: 2px solid rgba(129, 140, 248, 0.7);
+  box-shadow: 0 0 0 3px rgba(255, 255, 255, 0.9);
+  z-index: 1;
+}
+
+/* 进行中：呼吸脉冲光环 */
+.stream-progress-card.state-running .spc-node {
+  border-color: #6366f1;
+  color: transparent;
+}
+.stream-progress-card.state-running .spc-node::after {
+  content: '';
+  position: absolute;
+  inset: -2px;
+  border-radius: 50%;
+  border: 2px solid rgba(99, 102, 241, 0.55);
+  animation: spcPulse 1.6s ease-out infinite;
+}
+@keyframes spcPulse {
+  0%   { transform: scale(0.9); opacity: 0.9; }
+  70%  { transform: scale(1.65); opacity: 0; }
+  100% { transform: scale(1.65); opacity: 0; }
+}
+/* 进行中：卡片呼吸光晕 */
+.stream-progress-card.state-running {
+  border-color: rgba(99, 102, 241, 0.35);
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04), 0 4px 18px rgba(99, 102, 241, 0.12);
+}
+
+.stream-progress-card.state-success .spc-node {
+  background: linear-gradient(135deg, #34d399, #059669);
+  border-color: transparent;
+}
+.stream-progress-card.state-success {
+  border-color: rgba(16, 185, 129, 0.28);
+}
+
+.stream-progress-card.state-error .spc-node {
+  background: linear-gradient(135deg, #f87171, #dc2626);
+  border-color: transparent;
+}
+.stream-progress-card.state-error {
+  border-color: rgba(239, 68, 68, 0.3);
+  background: linear-gradient(180deg, rgba(255, 246, 245, 0.96), rgba(254, 242, 242, 0.92));
+}
+
+.stream-progress-card.state-warning .spc-node {
+  background: linear-gradient(135deg, #fbbf24, #d97706);
+  border-color: transparent;
+}
+.stream-progress-card.state-warning {
+  border-color: rgba(245, 158, 11, 0.3);
+  background: linear-gradient(180deg, rgba(255, 253, 247, 0.96), rgba(255, 251, 235, 0.92));
 }
 
 .stream-progress-card.fallback {
-  background: #f9fafb;
-  border-color: #e5e7eb;
-  color: #9ca3af;
+  background: rgba(249, 250, 251, 0.85);
+  border-style: dashed;
+  box-shadow: none;
 }
 
-.stream-progress-card.tone-success {
-  border-left: 3px solid #22c55e;
-  background: #f0fdf4;
-}
-
-.stream-progress-card.tone-error {
-  border-left: 3px solid #ef4444;
-  background: #fef2f2;
-}
-
-.stream-progress-card.tone-info {
-  border-left: 3px solid #818cf8;
+.stream-progress-card.reconnect {
+  border-color: rgba(245, 158, 11, 0.35);
+  background: linear-gradient(180deg, rgba(255, 251, 245, 0.96), rgba(255, 247, 237, 0.92));
 }
 
 .spc-header {
   display: flex;
   align-items: center;
-  gap: 7px;
-  font-weight: 500;
-  color: #374151;
+  gap: 8px;
+  font-weight: 600;
+  color: #334155;
+  min-width: 0;
 }
 
 .stream-progress-card.fallback .spc-header {
-  color: #9ca3af;
-}
-
-.spc-icon {
-  flex-shrink: 0;
-  width: 17px;
-  height: 17px;
-  border-radius: 50%;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 10px;
-  font-weight: 700;
-}
-
-.spc-icon.tone-success { background: #22c55e; color: #fff; }
-.spc-icon.tone-error   { background: #ef4444; color: #fff; }
-.spc-icon.tone-info    {
-  background: transparent;
-  color: #818cf8;
-  font-size: 14px;
-  font-weight: 400;
-  letter-spacing: -2px;
+  color: #94a3b8;
+  font-weight: 500;
 }
 
 .spc-title {
   flex: 1;
+  min-width: 0;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  font-size: 12.5px;
+  font-size: 13px;
+  letter-spacing: 0.2px;
 }
 
 .spc-badge {
   flex-shrink: 0;
-  background: #f3f4f6;
-  color: #6b7280;
-  border-radius: 4px;
-  padding: 1px 6px;
+  max-width: 55%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  background: linear-gradient(135deg, rgba(14, 165, 183, 0.12), rgba(99, 102, 241, 0.12));
+  color: #0f766e;
+  border: 1px solid rgba(14, 165, 183, 0.22);
+  border-radius: 999px;
+  padding: 2px 9px;
   font-size: 11px;
-  font-weight: 500;
+  font-weight: 600;
+  letter-spacing: 0.3px;
 }
 
-.stream-progress-card.tone-success .spc-badge {
-  background: rgba(34, 197, 94, 0.1);
-  color: #16a34a;
+.stream-progress-card.state-success .spc-badge {
+  background: rgba(16, 185, 129, 0.1);
+  color: #047857;
+  border-color: rgba(16, 185, 129, 0.25);
+}
+
+.stream-progress-card.state-error .spc-badge {
+  background: rgba(239, 68, 68, 0.08);
+  color: #b91c1c;
+  border-color: rgba(239, 68, 68, 0.22);
+}
+
+.stream-progress-card.state-warning .spc-badge,
+.stream-progress-card.reconnect .spc-badge {
+  background: rgba(245, 158, 11, 0.1);
+  color: #b45309;
+  border-color: rgba(245, 158, 11, 0.28);
 }
 
 .spc-details {
-  margin: 5px 0 0 24px;
+  margin: 6px 0 0;
   padding: 0;
   list-style: none;
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: 3px;
 }
 
 .spc-details li {
+  position: relative;
+  padding-left: 12px;
   font-size: 11.5px;
-  color: #6b7280;
+  color: #64748b;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 
 .spc-details li::before {
-  content: '·';
-  margin-right: 4px;
-  color: #d1d5db;
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 50%;
+  margin-top: -1.5px;
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: rgba(14, 165, 183, 0.45);
 }
 
-/* 底部 spinner */
-.spc-spinner {
+/* 底部 thinking 指示：细长流光条 */
+.spc-thinking {
   display: flex;
   align-items: center;
-  gap: 4px;
-  padding: 2px 4px;
+  gap: 10px;
+  padding: 2px 2px 4px;
+  margin-left: -16px;
 }
 
-.spc-spinner span {
-  display: inline-block;
-  width: 5px;
-  height: 5px;
-  border-radius: 50%;
-  background: #9ca3af;
-  animation: spcDot 1.2s infinite ease-in-out;
+.spc-thinking-track {
+  position: relative;
+  flex: 0 0 120px;
+  height: 4px;
+  border-radius: 999px;
+  background: rgba(148, 163, 184, 0.18);
+  overflow: hidden;
 }
 
-.spc-spinner span:nth-child(2) { animation-delay: 0.2s; }
-.spc-spinner span:nth-child(3) { animation-delay: 0.4s; }
+.spc-thinking-bar {
+  position: absolute;
+  top: 0;
+  left: 0;
+  height: 100%;
+  width: 40%;
+  border-radius: 999px;
+  background: linear-gradient(90deg, rgba(99, 102, 241, 0.9), rgba(14, 165, 183, 0.9));
+  animation: spcSweep 1.3s ease-in-out infinite;
+}
 
-@keyframes spcDot {
-  0%, 80%, 100% { transform: scale(0.6); opacity: 0.4; }
-  40%           { transform: scale(1.1); opacity: 1; }
+@keyframes spcSweep {
+  0%   { left: -40%; }
+  100% { left: 100%; }
+}
+
+.spc-thinking-text {
+  font-size: 11px;
+  color: #94a3b8;
+  letter-spacing: 2px;
+  animation: spcBreathe 1.6s ease-in-out infinite;
+}
+
+@keyframes spcBreathe {
+  0%, 100% { opacity: 0.55; }
+  50%      { opacity: 1; }
 }
 
 /* loading-dots（连接中状态） */
@@ -1669,10 +1831,7 @@ body {
   background: #b37feb;
 }
 
-/* 分组标题行的 checkbox 隐藏（虚拟图层不可交互） */
-.leaflet-control-layers .drone-group-label input[type='checkbox'] {
-  display: none;
-}
+/* 分组标题行的 checkbox 即整组显隐开关，保持可见可点击 */
 
 /* 分组标题折叠箭头 */
 .drone-group-arrow {
@@ -2108,17 +2267,16 @@ body {
 
 .pf-input:focus { outline: none; border-color: #f59e0b; }
 
-/* 进度卡片新增 tone：warning（校验/等待）与 reconnect（重连提示） */
-.stream-progress-card.tone-warning {
-  border-left: 3px solid #f59e0b;
-  background: #fffbeb;
-}
-
-.spc-icon.tone-warning { background: #f59e0b; color: #fff; }
+/* 进度卡片新增 tone：warning（校验/等待）与 reconnect（重连提示）由上方时间线风格统一渲染 */
 
 .stream-progress-card.reconnect {
-  background: #fff7ed;
-  border-color: #fed7aa;
+  border-color: rgba(245, 158, 11, 0.35);
+}
+
+/* loading-dots（连接中状态） */
+@keyframes spcDot {
+  0%, 80%, 100% { transform: scale(0.6); opacity: 0.4; }
+  40%           { transform: scale(1.1); opacity: 1; }
 }
 
 

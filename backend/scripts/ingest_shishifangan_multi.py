@@ -34,6 +34,8 @@ from datetime import datetime
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
+from kb_pipeline import Manifest, apply_incremental, full_rebuild
+
 # ─────────────────────────────────────────────
 # 文档配置（project 统一归入"实施方案"文件夹）
 # ─────────────────────────────────────────────
@@ -756,22 +758,18 @@ def split_oversized(chunks, doc_title):
 # ─────────────────────────────────────────────
 # 入库 / 导出
 # ─────────────────────────────────────────────
-def ingest(kb, chunks, doc_id, doc_title, rebuild=False):
+def ingest(kb, chunks, doc_id, doc_title, rebuild=False, manifest=None,
+           source_file=None, dry_run=False):
+    """入库：默认走切片级增量 merge；rebuild=True 时整篇重建。"""
     from llama_index.core.schema import TextNode, NodeRelationship, RelatedNodeInfo
-
-    if rebuild:
-        try:
-            kb._index.delete_ref_doc(doc_id, delete_from_docstore=True)
-            print(f"🗑  已删除旧文档节点 ref_doc={doc_id}")
-        except Exception as e:
-            print(f"（未找到旧节点或删除跳过：{e}）")
 
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     nodes = []
     for c in chunks:
         meta = {
-            "title": f"{doc_title}｜{c['breadcrumb'].split(' > ')[-1]}",
+            "title": f"{doc_title}\uff5c{c['breadcrumb'].split(' > ')[-1]}",
             "document_id": doc_id,
+            "source_url": f"/api/knowledge/preview/{doc_id}",
             "project": PROJECT,
             "project_name": PROJECT_NAME,
             "chunk_type": c["chunk_type"],
@@ -789,9 +787,20 @@ def ingest(kb, chunks, doc_id, doc_title, rebuild=False):
         node.relationships[NodeRelationship.SOURCE] = RelatedNodeInfo(node_id=doc_id)
         nodes.append(node)
 
-    print(f"📥 {doc_title}：插入 {len(nodes)} 个节点（向量化中）...")
-    kb._index.insert_nodes(nodes)
-    return True
+    if rebuild:
+        stats = full_rebuild(kb, manifest, doc_id, doc_title, nodes,
+                             source_file=source_file, source="ingest_script")
+        print(f"\U0001f4e5 {doc_title}\uff1a\u6574\u7bc7\u91cd\u5efa {stats['insert']} \u4e2a\u8282\u70b9")
+        return stats
+
+    stats = apply_incremental(kb, manifest, doc_id, doc_title, nodes,
+                              source_file=source_file, source="ingest_script",
+                              dry_run=dry_run)
+    tag = "dry-run " if dry_run else ""
+    print(f"\U0001f4e5 {doc_title}\uff1a{tag}keep={stats['keep']} "
+          f"insert={stats['insert']} delete={stats['delete']} "
+          f"\u5197\u4f59\u6e05\u7406={stats['redundant']}")
+    return stats
 
 
 def export_json(chunks, slug, cfg):
@@ -850,19 +859,29 @@ def main():
         export_json(chunks, slug, cfg)
         all_chunks[slug] = chunks
 
+    manifest = Manifest()
+
     if args.dry_run:
-        print("🧪 dry-run 完成，未入库。")
+        # 只算差分，不初始化向量库、不写任何数据
+        for slug in slugs:
+            cfg = CONFIGS[slug]
+            ingest(None, all_chunks[slug], cfg["doc_id"], cfg["title"],
+                   rebuild=False, manifest=manifest,
+                   source_file=cfg["md"], dry_run=True)
+        print("\U0001f9ea dry-run \u5b8c\u6210\uff08\u4ec5\u8ba1\u7b97\u5dee\u5206\uff0c\u672a\u5199\u5e93\uff09\u3002")
         return
 
     from tools.llamaindex_knowledge_tool import KnowledgeBaseTool
     kb = KnowledgeBaseTool()
     if not kb._ensure_initialized():
-        print("❌ LlamaIndex 初始化失败")
+        print("\u274c LlamaIndex \u521d\u59cb\u5316\u5931\u8d25")
         sys.exit(1)
 
     for slug in slugs:
         cfg = CONFIGS[slug]
-        ingest(kb, all_chunks[slug], cfg["doc_id"], cfg["title"], rebuild=args.rebuild)
+        ingest(kb, all_chunks[slug], cfg["doc_id"], cfg["title"],
+               rebuild=args.rebuild, manifest=manifest,
+               source_file=cfg["md"], dry_run=False)
 
     kb._index.storage_context.persist(persist_dir=kb._persist_dir)
     print(f"✅ 全部入库并持久化到：{kb._persist_dir}")

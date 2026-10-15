@@ -6,20 +6,33 @@ prompts.py — 提示词统一管理模块（单一来源原则 SSoT）
 """
 from typing import Dict
 
+from core import db_schema as DB
+
 # ============================================================
 # 一、业务规则常量
 # ============================================================
 
-BUSINESS_RULES = """
+BUSINESS_RULES = (
+    """
 ## 业务规则：高程判定（必须严格遵守）
 
 **字段物理意义**
-- `Measured_Depth`：实测高程（海拔高度），**严禁称为"实测深度"**
-- `Control_Elevation`：控制高程（准许挖掘的最低海拔红线）
-- 业务数据表：`ceshen`（字段名大小写敏感，SQL 中必须加双引号）
+- `"""
+    + DB.CESHEN_MEASURED_DEPTH
+    + """`：实测高程（海拔高度），**严禁称为"实测深度"**
+- `"""
+    + DB.CESHEN_CONTROL_ELEVATION
+    + """`：控制高程（准许挖掘的最低海拔红线）
+- 业务数据表：`"""
+    + DB.TABLE_CESHEN
+    + """`（字段名大小写敏感，SQL 中必须加双引号）
 
 **超深度开采判定公式**
-- 整体判定：`AVG("Control_Elevation" - "Measured_Depth") > 2`（米）
+- 整体判定：`AVG("""
+    + DB.quote(DB.CESHEN_CONTROL_ELEVATION)
+    + ' - '
+    + DB.quote(DB.CESHEN_MEASURED_DEPTH)
+    + """) > 2`（米）
 - 当且仅当整个砂场/区域的**平均差值超过 2m** 才定义为超深度开采
 - 若平均差值 ≤ 2m，即使个别点位超深，也**不得**定性为超深度开采
 
@@ -30,25 +43,37 @@ BUSINESS_RULES = """
 - 差值 > 2m："{区域}存在超深度开采。平均实测高程比控制高程低 {diff}m，超过 2m 允许范围。"
 - 差值 ≤ 2m："{区域}未构成超深度开采。整体平均实测高程符合控制要求（平均偏差在 2m 以内）。"
 """
+)
 
 # ============================================================
 # 二、工具路由规则常量
 # ============================================================
 
-TOOL_ROUTING_RULES = """
+TOOL_ROUTING_RULES = (
+    """
 ## 工具路由规则（按意图严格选择工具）
 
 **地图展示类（map_display / location_search）**
-- 2D Leaflet 视图：调用 `map_tool(action='load_vector_layer', table_name='ceshen', filter=...)`
+- 2D Leaflet 视图：调用 `map_tool(action='load_vector_layer', table_name='"""
+    + DB.TABLE_CESHEN
+    + """', filter=...)`
 - 3D Cesium 视图：调用 `cesium_tool(action='addGeoJsonLayer', ...)`
 - 位置跳转：先 `location_search` 查坐标，再 `map_tool(action='set_view')` 或 `cesium_tool(action='flyTo')`
 - 完整可采区/砂场名称（含"可采区"或"砂场"）：filter 必须用**等值匹配**，禁止 LIKE
-  示例：`"Mineable_Area_Name"='种子场可采区'`
+  示例：`"""
+    + DB.quote(DB.CESHEN_AREA_NAME)
+    + """='种子场可采区'`
 
 **数据查询类（data_query）**
 - 必须使用 `postgresql_tool`
 - 查询前先调用 `postgresql_tool(operation='get_db_schema')` 获取结构
-- 字段名必须加双引号：`"Mineable_Area_Name"`, `"Measured_Depth"`, `"Control_Elevation"`
+- 字段名必须加双引号：`"""
+    + DB.quote(DB.CESHEN_AREA_NAME)
+    + """`, `"""
+    + DB.quote(DB.CESHEN_MEASURED_DEPTH)
+    + """`, `"""
+    + DB.quote(DB.CESHEN_CONTROL_ELEVATION)
+    + """`
 
 **知识检索类（knowledge_search）**
 - 政策/流程/操作文档问题：必须先调用 `knowledge_base_tool(operation='search')`
@@ -81,8 +106,11 @@ TOOL_ROUTING_RULES = """
 - 空间筛选时，直接用 `postgresql_tool(operation='spatial_query', spatial_ref_layer='hx')` 即可，无需手动传 WKT
 - 示例流程：用户问"红线附近的采砂场有哪些" →
   ① spatial_reference_tool(action='get_geometry', layer='hx') 获取边界范围（确认数据可用）
-  ② postgresql_tool(operation='spatial_query', spatial_table='ceshen', spatial_ref_layer='hx') 直接筛选
+  ② postgresql_tool(operation='spatial_query', spatial_table='"""
+    + DB.TABLE_CESHEN
+    + """', spatial_ref_layer='hx') 直接筛选
 """
+)
 
 # ============================================================
 # 三、输出格式规范常量
@@ -126,11 +154,11 @@ _LEAFLET_VIEW_PROMPT = (
     "其中 satellite=卫星影像，arcgis=高分影像，osm=街道地图。"
     "当用户要求跳转或查找位置时，必须优先使用 location_search 查找坐标，"
     "然后通过 map_tool(action='set_view') 进行跳转。"
-    "请生成 map_tool(action='load_vector_layer', table_name='ceshen', filter=...) 的加载命令，"
+    "请生成 map_tool(action='load_vector_layer', table_name='" + DB.TABLE_CESHEN + "', filter=...) 的加载命令，"
     "其中字段名必须加双引号。"
-    "仅当加载 ceshen 表时，若用户给出了完整可采区/砂场名称（包含「可采区」或「砂场」），filter 必须使用等值匹配："
-    "\"Mineable_Area_Name\"='完整名称'，禁止用 LIKE。"
-    "加载 caiqu（可采区）/ hx（红线）图层表时不要传 filter（这些表没有 Mineable_Area_Name 列，直接加载全部要素）。"
+    "仅当加载 " + DB.TABLE_CESHEN + " 表时，若用户给出了完整可采区/砂场名称（包含「可采区」或「砂场」），filter 必须使用等值匹配："
+    "\"" + DB.CESHEN_AREA_NAME + "\"='完整名称'，禁止用 LIKE。"
+    "加载 caiqu（可采区）/ hx（红线）图层表时不要传 filter（这些表没有 " + DB.CESHEN_AREA_NAME + " 列，直接加载全部要素）。"
     "当用户要求清除标记时，使用 map_tool(action='clear_markers')。"
     "当用户上传图片/Excel 或输入坐标，要求生成矢量范围、转换坐标、投影变换时，使用 spatial_processing_tool。"
     "CGCS2000 Zone 38N (3度带, 带号38) 的推荐 EPSG 代码是 4526（东偏移已内置带号），也可使用 4547（需手动去带号前缀）。适用于信阳地区（约 114°E）。\n"
@@ -148,7 +176,7 @@ _CESIUM_VIEW_PROMPT = (
     "当用户要求跳转或查找位置时，先调用 location_search 查找坐标，"
     "再调用 cesium_tool(action='flyTo', lat=..., lng=..., height=100000) 执行飞行动画。"
     "当用户要求添加标注时，使用 cesium_tool(action='addMarker')。"
-    "当用户要求展示测深风险、超深风险、风险柱或三维柱状图时，使用 cesium_tool(action='addDepthColumns', table_name='ceshen')。"
+    "当用户要求展示测深风险、超深风险、风险柱或三维柱状图时，使用 cesium_tool(action='addDepthColumns', table_name='" + DB.TABLE_CESHEN + "')。"
     "当用户要求加载矢量图层时，先查询数据库再用 cesium_tool(action='addGeoJsonLayer')。"
     "当用户要求清除所有实体时，使用 cesium_tool(action='clearAll')。"
 )
@@ -157,7 +185,8 @@ _CESIUM_VIEW_PROMPT = (
 # 六、意图分类器扩展规则（补充 build_intent_classifier_prompt）
 # ============================================================
 
-_EXTRA_INTENT_RULES = """
+_EXTRA_INTENT_RULES = (
+    """
 ## 注意事项（详细版）
 1. 优先判断是否为纯地图操作意图（map_display, location_search）
 2. 数据查询必须使用 postgresql_tool
@@ -197,18 +226,38 @@ _EXTRA_INTENT_RULES = """
    - 执行计划：① spatial_reference_tool 获取几何 → ② 将几何传给 postgresql_tool(spatial_query) 或其他工具做空间筛选
    - **极其重要的区分**：上述规则仅适用于"获取边界/做空间筛选"的场景。
      若用户问"XX可采区/砂场的（控制开采）高程/深度/数量/面积是多少、范围是什么"，
-     这是数值数据查询，不是空间参考！必须判为 data_query，用 postgresql_tool 查 ceshen 表
-     （Control_Elevation=控制开采高程、Measured_Depth=实测高程、Year=年份），严禁直接编造数值作答。
+     这是数值数据查询，不是空间参考！必须判为 data_query，用 postgresql_tool 查 """
+    + DB.TABLE_CESHEN
+    + """ 表
+     （"""
+    + DB.CESHEN_CONTROL_ELEVATION
+    + """=控制开采高程、"""
+    + DB.CESHEN_MEASURED_DEPTH
+    + """=实测高程、Year=年份），严禁直接编造数值作答。
 9. 如果涉及多个意图，按执行顺序规划任务步骤
 10. execution_plan 中每个步骤的 step_id 从 1 开始递增
 
 ## 通用约束（必须严格遵守）
 1. 除非工具真实支持，否则不要臆造参数名。
-2. **计数统计规则（极其重要）**：ceshen 表每行是一个测量点（经纬度坐标），不是采区！
-   当用户问"多少个XX"（如砂场、采区、批复采区）时，必须使用 COUNT(DISTINCT "Mineable_Area_Name")
+2. **计数统计规则（极其重要）**："""
+    + DB.TABLE_CESHEN
+    + """ 表每行是一个测量点（经纬度坐标），不是采区！
+   当用户问"多少个XX"（如砂场、采区、批复采区）时，必须使用 COUNT(DISTINCT """
+    + DB.quote(DB.CESHEN_AREA_NAME)
+    + """)
    而不是 COUNT(*)！COUNT(*) 会计数所有测量点位，给出错误的大数值。
-   正确示例：SELECT COUNT(DISTINCT "Mineable_Area_Name") AS count FROM ceshen WHERE "County_District"='固始县'
-   错误示例：~~SELECT COUNT(*) FROM ceshen WHERE "County_District"='固始县'~~（这会返回测量点数而非采区数）
+   正确示例：SELECT COUNT(DISTINCT """
+    + DB.quote(DB.CESHEN_AREA_NAME)
+    + """) AS count FROM """
+    + DB.TABLE_CESHEN
+    + """ WHERE """
+    + DB.quote(DB.CESHEN_COUNTY)
+    + """='固始县'
+   错误示例：~~SELECT COUNT(*) FROM """
+    + DB.TABLE_CESHEN
+    + """ WHERE """
+    + DB.quote(DB.CESHEN_COUNTY)
+    + """='固始县'~~（这会返回测量点数而非采区数）
 3. 各工具的详细参数格式由系统按任务类型**按需注入**（见"相关工具参数约束"段落）；
    未注入约束的工具，参照本提示词中的执行计划示例与通用约束填写。
 
@@ -232,12 +281,23 @@ _EXTRA_INTENT_RULES = """
     "step_id": 1,
     "action": "加载采区矢量数据",
     "tool": "map_tool",
-    "params": {{"action": "load_vector_layer", "table_name": "ceshen", "filter": "\\"Mineable_Area_Name\\"='种子场可采区'", "layer_name": "种子场可采区"}},
+    "params": {{"action": "load_vector_layer", "table_name": """
+    + '"'
+    + DB.TABLE_CESHEN
+    + '"'
+    + """, "filter": """
+    + '"'
+    + '\\"'
+    + DB.CESHEN_AREA_NAME
+    + '\\"'
+    + """='种子场可采区'", "layer_name": "种子场可采区"}},
     "reasoning": "用户要求加载采区数据到地图",
     "expected_output": "矢量图层加载到地图上"
   }}
   ```
-  （filter 仅适用于 ceshen 表；加载 caiqu/hx 等图层表时不要传 filter）
+  （filter 仅适用于 """
+    + DB.TABLE_CESHEN
+    + """ 表；加载 caiqu/hx 等图层表时不要传 filter）
 
 ## 常见任务与工具选择
 - "生成某砂场的采砂监测分析报告"：仅一步，使用 caisha_report_tool，params 填 {{"site_name": "某砂场"}}，tool 字段填 "caisha_report_tool"
@@ -251,6 +311,7 @@ _EXTRA_INTENT_RULES = """
   - 关键词映射："红线""河道红线""管理红线" → layer='hx'；"采区""可采区""许可范围" → layer='caiqu'
   - primary_intent 应为 spatial_reference，steps 中先调用 spatial_reference_tool 再调用 postgresql_tool
 """
+)
 
 # ============================================================
 # 六之附：工具约束片段（按需注入，阶段6）
@@ -271,7 +332,7 @@ TOOL_CONSTRAINT_SNIPPETS: Dict[str, str] = {
         "- demand（必填）：包含地区、指标、图表类型、筛选条件等完整要求。\n"
         "- sql（可选，强烈推荐）：针对需求生成的 PostgreSQL 查询语句，可大幅提高执行效率。\n"
         "- chart_type（可选）：'bar' | 'line' | 'pie' | 'scatter'。\n"
-        "- SQL 生成规则：字段名含大写字母必须用双引号包裹，表名通常为 'ceshen'；\n"
+        "- SQL 生成规则：字段名含大写字母必须用双引号包裹，表名通常为 '" + DB.TABLE_CESHEN + "'；\n"
         "  除非用户明确要求 TOP-N，否则不要在 SQL 中加 LIMIT，应返回全部满足条件的数据。"
     ),
     "map_tool": (
@@ -281,7 +342,7 @@ TOOL_CONSTRAINT_SNIPPETS: Dict[str, str] = {
         "- 添加标记：action=\"add_marker\"，需提供 lat、lng\n"
         "- 清除标记：action=\"clear_markers\"\n"
         "- 设置视图：action=\"set_view\"，需提供 lat、lng、zoom\n"
-        "- 重要：filter 仅适用于 ceshen 表（如 \"Mineable_Area_Name\"='种子场可采区'）；\n"
+        "- 重要：filter 仅适用于 " + DB.TABLE_CESHEN + " 表（如 " + DB.quote(DB.CESHEN_AREA_NAME) + "='种子场可采区'）；\n"
         "  加载 caiqu（可采区）/ hx（红线）等图层表时不要传 filter，直接加载全部要素"
     ),
     "cesium_tool": (
@@ -289,7 +350,7 @@ TOOL_CONSTRAINT_SNIPPETS: Dict[str, str] = {
         "- 切换底图：action=\"setBasemap\"，basemap=\"satellite\"（卫星）| \"osm\"（街道）| \"tianditu\"（天地图）\n"
         "- 飞行到位置：action=\"flyTo\"，需提供 lat、lng\n"
         "- 添加GeoJSON图层：action=\"addGeoJsonLayer\"，需提供 table_name\n"
-        "- 测深风险柱：action=\"addDepthColumns\"，table_name='ceshen'\n"
+        "- 测深风险柱：action=\"addDepthColumns\"，table_name='" + DB.TABLE_CESHEN + "'\n"
         "- 清除所有：action=\"clearAll\""
     ),
     "spatial_processing_tool": (
@@ -363,15 +424,15 @@ INTENT_EXECUTOR_PROMPTS = {
         "仅允许使用 map_tool, location_search, coordinate_marker 与 postgresql_tool。"
         "当用户要求跳转或查找位置时，必须优先使用 location_search 查找坐标。"
         "当用户明确要求在特定经纬度标记点时，使用 coordinate_marker 工具。"
-        "若用户要求加载 ceshen 表且给出了完整可采区/砂场名称（包含\"可采区\"或\"砂场\"），"
-        "filter 必须使用等值匹配：\"Mineable_Area_Name\"='完整名称'，禁止用 LIKE。"
+        "若用户要求加载 " + DB.TABLE_CESHEN + " 表且给出了完整可采区/砂场名称（包含\"可采区\"或\"砂场\"），"
+        "filter 必须使用等值匹配：\"" + DB.CESHEN_AREA_NAME + "\"='完整名称'，禁止用 LIKE。"
         "加载 caiqu（可采区）/ hx（红线）图层表时不要传 filter，直接加载全部要素。"
     ),
     "data_query": (
         "本轮会话为数据查询任务。"
-        "业务数据表为 'ceshen'；"
-        "字段名必须加双引号，如 \"Mineable_Area_Name\", \"Measured_Depth\", \"Control_Elevation\"；"
-        "超深度开采判定：AVG(\"Control_Elevation\" - \"Measured_Depth\") > 2。"
+        "业务数据表为 '" + DB.TABLE_CESHEN + "'；"
+        "字段名必须加双引号，如 " + DB.quote(DB.CESHEN_AREA_NAME) + ", " + DB.quote(DB.CESHEN_MEASURED_DEPTH) + ", " + DB.quote(DB.CESHEN_CONTROL_ELEVATION) + "；"
+        "超深度开采判定：AVG(" + DB.quote(DB.CESHEN_CONTROL_ELEVATION) + " - " + DB.quote(DB.CESHEN_MEASURED_DEPTH) + ") > 2。"
     ),
     "knowledge_search": (
         "本轮会话为知识检索任务。"
@@ -456,10 +517,10 @@ def build_elevation_injection() -> str:
         "\n\n【高程判定业务规则】\n"
         "1. 术语规范：统一使用\"实测高程\"，严禁称为\"实测深度\"。\n"
         "2. 字段定义：\n"
-        "   - Measured_Depth（实测高程）：实地测量的海拔高度。\n"
-        "   - Control_Elevation（控制高程）：控制标准（最低许可海拔）。\n"
+        "   - " + DB.CESHEN_MEASURED_DEPTH + "（实测高程）：实地测量的海拔高度。\n"
+        "   - " + DB.CESHEN_CONTROL_ELEVATION + "（控制高程）：控制标准（最低许可海拔）。\n"
         "3. 超深判定（整体原则）：\n"
-        "   - 仅当 AVG(\"Control_Elevation\" - \"Measured_Depth\") > 2 时，整个区域才判定为超深度开采。\n"
+        "   - 仅当 AVG(" + DB.quote(DB.CESHEN_CONTROL_ELEVATION) + " - " + DB.quote(DB.CESHEN_MEASURED_DEPTH) + ") > 2 时，整个区域才判定为超深度开采。\n"
         "   - 平均差值 ≤ 2m，即使有个别点位超深，也判定为未构成超深度开采。"
     )
 
@@ -490,8 +551,8 @@ def build_intent_classifier_prompt(intent_list: str, tool_list: str) -> str:
 
 ## 业务背景
 - 地图与数据分析助手系统
-- 业务数据表：`ceshen`，含字段：`Mineable_Area_Name`（可采区名称）、`Measured_Depth`（实测高程）、`Control_Elevation`（控制高程）
-- 超深度开采判定：AVG("Control_Elevation" - "Measured_Depth") > 2
+- 业务数据表：`{DB.TABLE_CESHEN}`，含字段：`{DB.CESHEN_AREA_NAME}`（可采区名称）、`{DB.CESHEN_MEASURED_DEPTH}`（实测高程）、`{DB.CESHEN_CONTROL_ELEVATION}`（控制高程）
+- 超深度开采判定：AVG({DB.quote(DB.CESHEN_CONTROL_ELEVATION)} - {DB.quote(DB.CESHEN_MEASURED_DEPTH)}) > 2
 
 {{DB_SCHEMA_PLACEHOLDER}}
 
@@ -513,7 +574,8 @@ def build_intent_classifier_prompt(intent_list: str, tool_list: str) -> str:
 # 十、旧版 Qwen Assistant 系统提示词（services/agent_builder 装配时注入）
 # ============================================================
 
-LEGACY_ASSISTANT_SYSTEM_PROMPT = """你是一个专业的地图与数据分析助手，负责完成地图展示、数据库分析、政策查询和数据可视化任务。
+LEGACY_ASSISTANT_SYSTEM_PROMPT = (
+    """你是一个专业的地图与数据分析助手，负责完成地图展示、数据库分析、政策查询和数据可视化任务。
 
 ------------------------------------------------------------
 一、核心规则（最高优先级）
@@ -532,7 +594,9 @@ LEGACY_ASSISTANT_SYSTEM_PROMPT = """你是一个专业的地图与数据分析�
 - 3D Cesium 视图且用户要求“测深风险/超深风险/风险柱/三维柱状展示”时：调用 cesium_tool(action='addDepthColumns')
 
 如果是矢量图层加载，严格要求：
-- 2D 模式必须使用 table_name='ceshen'
+- 2D 模式必须使用 table_name='"""
+    + DB.TABLE_CESHEN
+    + """'
 - 必须根据用户提到的名称设置 filter
 - 严禁调用 location_search 或 add_marker
 - 严禁在文本中返回经纬度
@@ -541,8 +605,13 @@ LEGACY_ASSISTANT_SYSTEM_PROMPT = """你是一个专业的地图与数据分析�
 
 map_tool(
 action='load_vector_layer',
-table_name='ceshen',
-filter="\"Mineable_Area_Name\"='种子场可采区'",
+table_name='"""
+    + DB.TABLE_CESHEN
+    + """',
+filter="""
+    + '"'
+    + DB.quote(DB.CESHEN_AREA_NAME)
+    + """='种子场可采区'",
 layer_name='种子场可采区'
 )
 
@@ -555,7 +624,9 @@ layer_name='种子场可采区'
 
 所有业务数据均来自 PostgreSQL 表：
 
-ceshen
+"""
+    + DB.TABLE_CESHEN
+    + """
 
 查询规则：
 
@@ -565,15 +636,23 @@ postgresql_tool(operation='get_db_schema')
 
 ② 字段必须加双引号，例如：
 
-"Mineable_Area_Name"
-"Measured_Depth"
-"Control_Elevation"
+"""
+    + DB.quote(DB.CESHEN_AREA_NAME)
+    + "\n"
+    + DB.quote(DB.CESHEN_MEASURED_DEPTH)
+    + "\n"
+    + DB.quote(DB.CESHEN_CONTROL_ELEVATION)
+    + """
 
 ③ 查询示例：
 
 SELECT
-AVG("Measured_Depth")
-FROM ceshen
+AVG("""
+    + DB.quote(DB.CESHEN_MEASURED_DEPTH)
+    + """)
+FROM """
+    + DB.TABLE_CESHEN
+    + """
 
 ------------------------------------------------------------
 
@@ -641,7 +720,19 @@ conclusion（结论）：
 
 正确流程：
 1. knowledge_base_tool(operation='search', query='超深度开采判定规则 固始县')
-2. postgresql_tool(operation='query', sql='SELECT "Mineable_Area_Name", AVG("Control_Elevation"-"Measured_Depth") as avg_depth FROM ceshen WHERE "County_District"=\'固始县\' GROUP BY "Mineable_Area_Name"')
+2. postgresql_tool(operation='query', sql='SELECT """
+    + DB.quote(DB.CESHEN_AREA_NAME)
+    + """, AVG("""
+    + DB.quote(DB.CESHEN_CONTROL_ELEVATION)
+    + """-"""
+    + DB.quote(DB.CESHEN_MEASURED_DEPTH)
+    + """) as avg_depth FROM """
+    + DB.TABLE_CESHEN
+    + """ WHERE """
+    + DB.quote(DB.CESHEN_COUNTY)
+    + """='固始县' GROUP BY """
+    + DB.quote(DB.CESHEN_AREA_NAME)
+    + """')
 3. report_generator_tool(variables={
      'report_title': '固始县砂场超深度开采分析报告',
      'summary': '本报告依据信阳市智慧巡河监管要求，对固始县XX个砂场进行超深度开采核查。（引用政策规范名称，不照搬原文）',
@@ -726,12 +817,20 @@ postgresql_tool
 **警告：严禁将"实测高程"称为"实测深度"！两者物理意义相反！**
 
 1. 字段物理意义：
-   - Measured_Depth：代表"实测高程"（海拔高度）。
-   - Control_Elevation：代表"控制高程"（准许挖掘的最低海拔）。
+   - """
+    + DB.CESHEN_MEASURED_DEPTH
+    + """：代表"实测高程"（海拔高度）。
+   - """
+    + DB.CESHEN_CONTROL_ELEVATION
+    + """：代表"控制高程"（准许挖掘的最低海拔）。
 
 2. 判定逻辑：
    - 整体超深度开采定义：整个砂场的（实测高程-控制高程）测深点的 **平均差值超过 2米**，即定义为超深度开采。
-     即：AVG(Control_Elevation - Measured_Depth) > 2。
+     即：AVG("""
+    + DB.CESHEN_CONTROL_ELEVATION
+    + """ - """
+    + DB.CESHEN_MEASURED_DEPTH
+    + """) > 2。
    - 否则：视为整体合规（未构成超深度开采）。
    - 注意：如果平均差值未超过 2米，即使存在个别点位差值较大，也不能将该砂场定性为"超深度开采"。
 
@@ -807,5 +906,8 @@ postgresql_tool
 
 示例：用户问"红线附近的采砂场有哪些"
 步骤① spatial_reference_tool(action='get_geometry', layer='hx')
-步骤② postgresql_tool(operation='spatial_query', spatial_table='ceshen', spatial_op='within', spatial_geom_wkt='<步骤①返回的几何WKT>')
+步骤② postgresql_tool(operation='spatial_query', spatial_table='"""
+    + DB.TABLE_CESHEN
+    + """', spatial_op='within', spatial_geom_wkt='<步骤①返回的几何WKT>')
         """
+)

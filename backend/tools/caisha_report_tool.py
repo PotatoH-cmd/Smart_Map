@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 BACKEND_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 DB_CFG = {
-    "host": "172.136.16.52",
+    "host": os.environ.get("GEOSERVER_PG_HOST", "172.136.16.52"),
     "port": 5432,
     "dbname": "postgres",
     "user": "postgres",
@@ -58,6 +58,8 @@ FALLBACK_PROJ4 = {
 
 LLM_MODEL = os.environ.get("CAISHA_LLM_MODEL", "qwen-plus")
 VLM_MODEL = os.environ.get("CAISHA_VLM_MODEL", "qwen-vl-max")
+# LLM/VLM HTTP 调用超时（秒）：防 dashscope 无超时阻塞导致工具与 run 一直不返回
+_LLM_TIMEOUT = int(os.environ.get("CAISHA_LLM_TIMEOUT", "120"))
 
 BASIC_FIELDS = [
     ("location", "采砂区域位置（河流名、行政村、桩号范围等原文描述）"),
@@ -342,7 +344,12 @@ class CaishaReportTool(BaseTool):
     def _normalize_site_name(self, site: str) -> str:
         """站点名归一化：输入在 rtk_points 中不存在、且形如 "主名-数字"（如 青龙闵塆采区-1）时，
         若去掉 "-数字" 后缀的主名存在测点，则归一化到主名（同许可证多采区合并为一份报告）。
-        合法含 "-数字" 后缀的站点名（如 竹竿河-1、固始县...工程-01）优先按原样匹配。"""
+        合法含 "-数字" 后缀的站点名（如 竹竿河-1、固始县...工程-01）优先按原样匹配。
+
+        冗余后缀剥离：意图 LLM 提取的"砂场全名"常把库中两种命名风格叠加，
+        如 "中山村采区采砂场" → "中山村采区"、"牛老家、龙潭采区采砂场" → "牛老家、龙潭采区"。
+        最后兜底：库中唯一包含该名称的站点名（如 "童庙可采区" → "史灌河童庙可采区"），
+        多义时不猜，保持原样由调用方报错。"""
         import psycopg2
 
         def exists(name: str) -> bool:
@@ -361,6 +368,30 @@ class CaishaReportTool(BaseTool):
         m = re.match(r'^(.*?)[-_](\d+)$', site)
         if m and exists(m.group(1)):
             return m.group(1)
+        # 冗余后缀剥离（"XX采区采砂场" / "XX采区砂场" 等叠加写法）
+        candidates = [site]
+        for tail in ("采砂场", "砂场", "可采区", "采区"):
+            if site.endswith(tail):
+                base = site[:-len(tail)].strip()
+                if base and exists(base):
+                    return base
+                if base and base not in candidates:
+                    candidates.append(base)
+        # 唯一包含匹配兜底（多义不猜）：对原文及各剥离候选逐个尝试，
+        # 覆盖 "童庙可采区" → "史灌河童庙可采区" 这类库名带前缀的场景
+        for cand in candidates:
+            try:
+                conn = psycopg2.connect(**DB_CFG)
+                cur = conn.cursor()
+                cur.execute(
+                    "SELECT site_name FROM rtk_points WHERE site_name LIKE %s "
+                    "GROUP BY site_name LIMIT 2", (f"%{cand}%",))
+                matches = [row[0] for row in cur.fetchall()]
+                conn.close()
+                if len(matches) == 1:
+                    return matches[0]
+            except Exception:
+                continue
         return site
 
     def _rtk_stats(self, site: str) -> Optional[Dict[str, Any]]:
@@ -420,11 +451,14 @@ class CaishaReportTool(BaseTool):
     @staticmethod
     def _llm(prompt: str) -> str:
         import dashscope
+        # 显式 timeout：dashscope SDK 默认无超时，网络异常（无网/超时/限流重试）可无限阻塞，
+        # 会让工具与整个 run 一直卡在 running 而用户"一直不出结果"。超时走 fail-fast 报错。
         resp = dashscope.Generation.call(
             model=LLM_MODEL,
             api_key=os.environ.get('DASHSCOPE_API_KEY'),
             messages=[{'role': 'user', 'content': prompt}],
             result_format='message',
+            timeout=_LLM_TIMEOUT,
         )
         if resp.status_code == 200:
             return resp.output.choices[0].message.content.strip()
@@ -889,11 +923,17 @@ class CaishaReportTool(BaseTool):
         if not related:
             logger.warning('现场监测报告未检索到 %s 相关内容', site)
             return f'现场监测报告知识库中未检索到{site}的监测记录（{MISSING}）。', []
-        # 切片元数据里的现场图片地址（逗号分隔）→ 下载到本地
+        # 现场图片地址：优先 metadata.image_paths（逗号分隔）；
+        # 兜底从正文文本提取（正文含“【图】｜图片地址：http://…”）。实测入库时
+        # image_paths 元数据常为空，导致现场照片一直取不到、报告只有文字没图片。
+        _IMG_RE = re.compile(r'https?://[^\s】,，;；、。]+')
         photo_urls = []
         for h in related[:5]:
             raw = (h.get('metadata') or {}).get('image_paths') or ''
-            for u in raw.split(','):
+            sources = [u for u in raw.split(',') if u.strip()]
+            body = (h.get('content') or h.get('text') or '')
+            sources += [m.group(0).rstrip(').）.,') for m in _IMG_RE.finditer(body)]
+            for u in sources:
                 u = u.strip()
                 if u and u not in photo_urls:
                     photo_urls.append(u)

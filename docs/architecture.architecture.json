@@ -1,0 +1,85 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "locale": "zh-CN",
+    "visual_preset": "signal-flow",
+    "title": "Map Assistant v1 系统架构",
+    "subtitle": "水利地图 AI 助手 — 前端 / 主后端 / 工具中台 / 意图服务 / 遥感推理 / 知识库"
+  },
+  "layout": { "mode": "grid", "cols": 5 },
+  "components": [
+    { "id": "sqlite", "row": 0, "col": 2, "type": "database", "label": "SQLite 会话库", "sublabel": "sessions.db · 记忆" },
+
+    { "id": "user", "row": 1, "col": 0, "type": "external", "label": "业务用户", "sublabel": "浏览器访问" },
+    { "id": "frontend", "row": 1, "col": 1, "type": "frontend", "label": "React 前端", "sublabel": "MapLibre · Cesium", "tag": ":3004" },
+    { "id": "backend", "row": 1, "col": 2, "type": "backend", "label": "主后端 FastAPI", "sublabel": "ReAct 循环 · 会话", "tag": ":8006" },
+    { "id": "intent", "row": 1, "col": 3, "type": "backend", "label": "意图服务", "sublabel": "泛化意图路由", "tag": ":8010" },
+
+    { "id": "tianditu", "row": 2, "col": 0, "type": "cloud", "label": "天地图", "sublabel": "浏览器端底图" },
+    { "id": "vllm", "row": 2, "col": 1, "type": "backend", "label": "vLLM 本机大模型", "sublabel": "qwen3.8-27b", "tag": ":8000" },
+    { "id": "dashscope", "row": 2, "col": 2, "type": "cloud", "label": "阿里 DashScope", "sublabel": "qwen-flash + web_search" },
+    { "id": "toolhub", "row": 2, "col": 3, "type": "backend", "label": "工具中台 Tool Hub", "sublabel": "四类 Provider · SSOT", "tag": ":8011" },
+    { "id": "falcon", "row": 2, "col": 4, "type": "backend", "label": "Falcon 遥感推理", "sublabel": "Qwen-VL+GRPO 检测", "tag": ":8765" },
+
+    { "id": "mcpqgis", "row": 3, "col": 3, "type": "backend", "label": "QGIS MCP Server", "sublabel": "27 工具 · streamable-http" },
+    { "id": "geoserver", "row": 3, "col": 4, "type": "backend", "label": "GeoServer", "sublabel": "瓦片/图层服务", "tag": ":8088" },
+
+    { "id": "postgis", "row": 4, "col": 4, "type": "database", "label": "PostGIS 空间库", "sublabel": "172.136.16.52", "tag": ":5432" }
+  ],
+  "boundaries": [
+    {
+      "kind": "region",
+      "label": "gpu-server-1 服务器（PM2 进程托管 · ufw 放行 8006/3004/8011/8010）",
+      "wraps": ["sqlite", "frontend", "backend", "intent", "vllm", "toolhub", "falcon", "mcpqgis", "geoserver"]
+    },
+    {
+      "kind": "security-group",
+      "label": "外部云服务（个人 API Key 已清空，接手人需自备凭证）",
+      "wraps": ["dashscope", "tianditu"]
+    }
+  ],
+  "connections": [
+    { "from": "user", "to": "frontend", "variant": "emphasis", "label": "HTTP", "labelAt": [340, 274] },
+    { "from": "frontend", "to": "backend", "variant": "emphasis", "label": "/api/* 反代", "labelAt": [340, 274] },
+    { "from": "backend", "to": "intent", "label": "意图识别", "labelAt": [500, 274] },
+    { "from": "backend", "to": "sqlite", "label": "会话/记忆", "labelAt": [420, 154] },
+    { "from": "backend", "to": "vllm", "label": "LLM 推理" },
+    { "from": "backend", "to": "dashscope", "variant": "dashed", "label": "qwen-flash / 联网搜索", "labelAt": [420, 274] },
+    { "from": "backend", "to": "toolhub", "label": "工具目录 · 失败回退" },
+    { "from": "toolhub", "to": "falcon", "label": "遥感检测", "labelAt": [660, 478] },
+    { "from": "toolhub", "to": "mcpqgis", "label": "空间分析工具", "labelAt": [580, 478] },
+    { "from": "backend", "to": "geoserver", "label": "地图服务代理", "labelAt": [820, 240], "fromSide": "bottom", "toSide": "top", "via": [[420, 260], [820, 260], [820, 376], [740, 376]] },
+    { "from": "geoserver", "to": "postgis", "label": "PostGIS Store", "labelAt": [740, 478] },
+    { "from": "frontend", "to": "tianditu", "variant": "dashed", "label": "底图瓦片" }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "请求主链路",
+      "items": [
+        "浏览器 → :3004 前端 → :8006 主后端（ReAct 循环 + Agent Search 多轮检索）",
+        "主后端 → :8011 工具中台按意图分发 Provider（Native 15 / MCP 27 / HTTP / Skill）",
+        "环境开关 TOOL_HUB_URL / INTENT_SERVICE_URL：微服务不可用时自动回退进程内实现"
+      ]
+    },
+    {
+      "dot": "violet",
+      "title": "知识库链路",
+      "items": [
+        "LlamaIndex 混合检索：向量 + BM25（jieba 分词）→ RRF 融合（k=60）→ 可选 rerank",
+        "RagFlow / Dify 作为 fallback 数据源，KNOWLEDGE_BACKEND 环境变量切换",
+        "LangFuse（:2009）记录全链路 trace，由主后端上报"
+      ]
+    },
+    {
+      "dot": "amber",
+      "title": "交接注意事项",
+      "items": [
+        "backend/.env 与 frontend/.env 中 8 项个人 API Key 已于 2026-09-09 清空（DashScope/RagFlow/Dify/LangFuse/天地图×2/和风/Cesium）",
+        "和风天气 key 原已失效：weather_tool 自动降级为 DashScope 联网搜索，WEATHER_MOCK=1 才启用 mock",
+        "服务由 PM2 托管（map-assistant-backend / map-assistant-frontend / tool-hub / intent-service），配置见 ecosystem.config.js"
+      ]
+    }
+  ]
+}

@@ -35,6 +35,11 @@ class ToolSpec(BaseModel):
             "enabled": self.enabled,
         }
 
+    def json_schema(self) -> Dict[str, Any]:
+        """parameters → 标准 JSON Schema（参数校验与 tools= 注入共用同一转换来源）。"""
+        from .param_validate import params_to_json_schema
+        return params_to_json_schema(self.parameters)
+
 
 class InvokeResult(BaseModel):
     """统一调用结果契约：{success, data, message}（与现有工具约定一致）。"""

@@ -6,7 +6,6 @@ import httpx
 import json
 import logging
 import operator
-import os
 import re
 from typing import Annotated, List, Dict, Any, Optional, TypedDict, AsyncGenerator
 from urllib.parse import quote
@@ -14,9 +13,10 @@ from urllib.parse import quote
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
 
-from ..intent_types import IntentType, IntentResult, TaskStep
+from ..intent_types import IntentType, IntentResult
 from ..qgis_workflows import match_recipe, extract_params, substitute_params, RECIPES
 from ..state import AgentState, QwenToolAdapter
+from ..providers import resolve as resolve_deterministic_answer
 
 logger = logging.getLogger(__name__)
 
@@ -217,9 +217,25 @@ class ExtractNodeMixin:
                 if not s.startswith("[postgresql_tool]") and not s.startswith("[mcp_postgres_tool]")
             ]
             tool_summaries.insert(0, (
-                "【重要】数据库中没有该地区的砂场数据（数据库仅覆盖固始县），"
+                "【重要】数据库未查询到该地区的数据，"
                 "请完全依据以下知识库检索结果回答用户问题，不要提及数据库结果。"
             ))
+
+        # ── 确定性回答策略 ──
+        # 某些领域（如采砂场数量统计）工具结果已足以给出权威回答时，绕过 LLM
+        # 直接写 response，避免随机召回/漏计数导致 summarize 误答。所有领域特化的
+        # 确定性回答逻辑收敛到 providers 注册表，此处仅统一调度。
+        stat_answer = resolve_deterministic_answer(state, tool_results)
+        if stat_answer:
+            state["response"] = stat_answer
+            # 直写回答绕过了 summarize_node，这里同样补齐结构化溯源引用
+            try:
+                state["kb_sources"] = self._collect_kb_sources(tool_results)
+            except Exception as e:
+                logger.warning(f"[extract_node] 收集知识库溯源失败: {e}")
+            logger.info(
+                f"[extract_node] Deterministic answer: {stat_answer[:60]}..."
+            )
 
         state["map_commands"] = map_commands
         state["cesium_commands"] = cesium_commands
@@ -310,6 +326,51 @@ class ExtractNodeMixin:
         if len(titles) > 3:
             shown += f" 等 {len(titles)} 篇文档"
         return f"{response_text}\n\n📎 来源：{shown}"
+
+    def _collect_kb_sources(self, tool_results: List[Dict]) -> List[Dict]:
+        """结构化知识库溯源引用：按文档去重，保留章节与溯源链接，供前端渲染引用卡片。
+
+        每条：{document_id, title, section, source_url}；source_url 缺失时退化为
+        /api/knowledge/preview/{document_id}（后端溯源预览页）。
+        """
+        merged: List[Dict] = []
+        seen_keys: set = set()
+        for item in tool_results:
+            if item.get("tool_name") != "knowledge_base_tool":
+                continue
+            result = item.get("result", {})
+            if not isinstance(result, dict) or not result.get("success"):
+                continue
+            data = result.get("data")
+            if not isinstance(data, list):
+                continue
+            for chunk in data:
+                if not isinstance(chunk, dict):
+                    continue
+                doc_id = str(chunk.get("document_id") or "").strip()
+                meta = chunk.get("metadata") if isinstance(chunk.get("metadata"), dict) else {}
+                title = str(chunk.get("title") or meta.get("title") or "").strip()
+                if not title or title == "未命名文档":
+                    continue
+                title = re.sub(r"^section_\d+_", "", title)
+                title = re.sub(r"^\d+_[\d.]*_?", "", title)
+                title = re.sub(r"\.(txt|md|docx?|pdf)$", "", title, flags=re.IGNORECASE)
+                dedup_key = f"{doc_id}|{meta.get('breadcrumb') or ''}"
+                if dedup_key in seen_keys:
+                    continue
+                seen_keys.add(dedup_key)
+                source_url = str(meta.get("source_url") or "").strip()
+                if not source_url and doc_id:
+                    source_url = f"/api/knowledge/preview/{doc_id}"
+                merged.append({
+                    "document_id": doc_id,
+                    "title": title,
+                    "section": str(meta.get("breadcrumb") or ""),
+                    "source_url": source_url,
+                })
+                if len(merged) >= 5:
+                    return merged
+        return merged
 
     def _append_web_sources(self, response_text: str, tool_results: List[Dict]) -> str:
         """联网搜索回答的来源标注兜底：提取搜索结果标题+域名，去重后追加到回复末尾。
@@ -418,6 +479,16 @@ class ExtractNodeMixin:
                     normalized["operation"] = "query"
             if "params" not in normalized:
                 normalized["params"] = []
+            return normalized
+
+        # knowledge_base_tool：LLM 偶发漏填 operation（只给 query），工具侧会直接报
+        # "不支持的操作: None" 失败，用户只能拿到"系统无法提供"的空答复；补默认检索。
+        # query 也缺失时用用户原问题兜底（同 weather_tool 的 city 兜底先例）。
+        if tool_name == "knowledge_base_tool":
+            if not normalized.get("operation") and normalized.get("query"):
+                normalized["operation"] = "search"
+            if normalized.get("operation") == "search" and not normalized.get("query"):
+                normalized["query"] = user_message
             return normalized
 
         # map_tool：补参 resume 只带 table_name 时，默认视为加载矢量图层

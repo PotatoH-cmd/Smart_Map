@@ -7,6 +7,8 @@ from typing import Dict, List, Any, Optional, Union
 from qwen_agent.tools.base import BaseTool, register_tool
 import dashscope
 
+from core import db_schema as DB
+
 # 导入 PostgreSQLTool 以复用其逻辑
 from .postgresql_tool import PostgreSQLTool
 from .schema_manager import SchemaManager
@@ -40,7 +42,7 @@ class DataVisualizerTool(BaseTool):
         
         # 初始化 PostgreSQLTool
         self.pg_tool = PostgreSQLTool({
-            'host': '172.136.16.52',
+            'host': os.environ.get('GEOSERVER_PG_HOST', '172.136.16.52'),
             'port': 5432,
             'database': 'postgres',
             'user': 'postgres',
@@ -190,30 +192,30 @@ class DataVisualizerTool(BaseTool):
             return ""
 
         filters = [
-            '"Control_Elevation" IS NOT NULL',
-            '"Measured_Depth" IS NOT NULL',
-            '"Mineable_Area_Name" IS NOT NULL',
+            f'{DB.quote(DB.CESHEN_CONTROL_ELEVATION)} IS NOT NULL',
+            f'{DB.quote(DB.CESHEN_MEASURED_DEPTH)} IS NOT NULL',
+            f'{DB.quote(DB.CESHEN_AREA_NAME)} IS NOT NULL',
         ]
         county_name = self._extract_county_name(text)
         if county_name:
             county = self._escape_sql_literal(county_name)
-            filters.append(f'"County_District" = \'{county}\'')
+            filters.append(f'{DB.quote(DB.CESHEN_COUNTY)} = \'{county}\'')
         year_match = re.search(r'(20\d{2})\s*年?', text)
         if year_match:
             filters.append(f'"Year" = {int(year_match.group(1))}')
 
         where_clause = " AND ".join(filters)
-        diff_expr = '("Control_Elevation" - "Measured_Depth")::numeric'
+        diff_expr = f'({DB.quote(DB.CESHEN_CONTROL_ELEVATION)} - {DB.quote(DB.CESHEN_MEASURED_DEPTH)})::numeric'
         return (
-            'SELECT "Mineable_Area_Name", '
+            f'SELECT {DB.quote(DB.CESHEN_AREA_NAME)}, '
             'COUNT(*) AS point_count, '
             f'ROUND(AVG({diff_expr}), 3) AS avg_over_depth, '
             f'ROUND(MAX({diff_expr}), 3) AS max_over_depth, '
             f'ROUND(MIN({diff_expr}), 3) AS min_over_depth, '
             f"CASE WHEN AVG({diff_expr}) > 2 THEN '超深度开采' ELSE '未构成超深度开采' END AS over_depth_status "
-            'FROM "ceshen" '
+            f'FROM "{DB.TABLE_CESHEN}" '
             f'WHERE {where_clause} '
-            'GROUP BY "Mineable_Area_Name" '
+            f'GROUP BY {DB.quote(DB.CESHEN_AREA_NAME)} '
             'ORDER BY avg_over_depth DESC;'
         )
 
@@ -238,16 +240,16 @@ class DataVisualizerTool(BaseTool):
 
         extra_rules = ""
         if any(k in (demand or "") for k in ["超深", "超深深度", "平均超深"]):
-            extra_rules = """
+            extra_rules = f"""
 业务规则：
 1. “超深深度”严格定义为整个区域或砂场的平均差值。
-   - 平均超深：AVG("Control_Elevation" - "Measured_Depth")
-   - 违规判定标准：只有当 AVG("Control_Elevation" - "Measured_Depth") > 2 时，整个区域才算作“超深度开采”。
-   - 最大超深：MAX("Control_Elevation" - "Measured_Depth")（作为辅助参考，但不作为超深判定标准）
+   - 平均超深：AVG({DB.quote(DB.CESHEN_CONTROL_ELEVATION)} - {DB.quote(DB.CESHEN_MEASURED_DEPTH)})
+   - 违规判定标准：只有当 AVG({DB.quote(DB.CESHEN_CONTROL_ELEVATION)} - {DB.quote(DB.CESHEN_MEASURED_DEPTH)}) > 2 时，整个区域才算作“超深度开采”。
+   - 最大超深：MAX({DB.quote(DB.CESHEN_CONTROL_ELEVATION)} - {DB.quote(DB.CESHEN_MEASURED_DEPTH)})（作为辅助参考，但不作为超深判定标准）
 2. 请在 SELECT 中同时包含平均超深和最大超深指标，以便进行全面分析。
 3. 对计算结果进行两位小数的四舍五入。
-4. 仅统计非空记录：需要添加 "Control_Elevation" IS NOT NULL AND "Measured_Depth" IS NOT NULL 的过滤条件。
-5. 如用户指定地区（如县区），使用 "County_District" 精确匹配；如指定采区名称，使用 "Mineable_Area_Name" 精确匹配。
+4. 仅统计非空记录：需要添加 {DB.quote(DB.CESHEN_CONTROL_ELEVATION)} IS NOT NULL AND {DB.quote(DB.CESHEN_MEASURED_DEPTH)} IS NOT NULL 的过滤条件。
+5. 如用户指定地区（如县区），使用 {DB.quote(DB.CESHEN_COUNTY)} 精确匹配；如指定采区名称，使用 {DB.quote(DB.CESHEN_AREA_NAME)} 精确匹配。
 """
         prompt = f"""你是一个专业的 SQL 生成专家。请根据提供的数据库结构、参考案例和用户需求，生成一个标准的 PostgreSQL SQL 查询语句。
 
@@ -261,8 +263,8 @@ class DataVisualizerTool(BaseTool):
 
 严格遵守以下规则：
 1. 只返回 SQL 语句本身，不要包含任何解释、注释或 Markdown 代码块标记（如 ```sql）。
-2. 字段名如果包含大写字母，必须使用双引号包裹，例如 "Mineable_Area_Name"。
-3. 业务数据表通常为 'ceshen'。
+2. 字段名如果包含大写字母，必须使用双引号包裹，例如 {DB.quote(DB.CESHEN_AREA_NAME)}。
+3. 业务数据表通常为 '{DB.TABLE_CESHEN}'。
 4. 确保生成的 SQL 能够直接在 PostgreSQL 中运行。
 5. 除非用户明确要求 TOP-N（如"前10名"），否则不要使用 LIMIT，应返回全部满足条件的数据。
 {extra_rules}
@@ -303,7 +305,7 @@ class DataVisualizerTool(BaseTool):
 2. 必须严格使用数据库中真实存在的字段名与表名。
 3. 字段名若含大写字母，必须使用双引号。
 4. 若报错为“column does not exist/字段不存在”，请替换为 schema 中最匹配字段。
-5. 默认查询表为 ceshen，除非 schema 显示应使用其他表。
+5. 默认查询表为 {DB.TABLE_CESHEN}，除非 schema 显示应使用其他表。
 6. 保持与原需求一致，且 SQL 可直接执行。
 """
         response = dashscope.Generation.call(
@@ -380,7 +382,7 @@ class DataVisualizerTool(BaseTool):
     def _is_over_depth_demand(self, demand: str) -> bool:
         if not demand:
             return False
-        keywords = ['超深', '超深深度', '平均超深', '平均差值', '控制高程', 'Measured_Depth', 'Control_Elevation']
+        keywords = ['超深', '超深深度', '平均超深', '平均差值', '控制高程', DB.CESHEN_MEASURED_DEPTH, DB.CESHEN_CONTROL_ELEVATION]
         return any(k in demand for k in keywords)
 
     def _pick_numeric_field(self, row: Dict[str, Any], aliases: List[str]) -> Optional[float]:
@@ -421,7 +423,7 @@ class DataVisualizerTool(BaseTool):
 
         row = data[0]
         category_field = self._find_field(row, [
-            'Mineable_Area_Name', 'mineable_area_name', 'area_name', 'name', '采区名称', '砂场名称'
+            DB.CESHEN_AREA_NAME, 'mineable_area_name', 'area_name', 'name', '采区名称', '砂场名称'
         ])
         avg_field = self._find_field(row, [
             'avg_over_depth', 'avg_depth_diff', 'avg_diff', 'avg_difference',
@@ -491,7 +493,7 @@ class DataVisualizerTool(BaseTool):
         over_rows = [r for r in rows if r['avg'] > threshold]
         summary = (
             f"### 📊 **{title}**\n\n"
-            f"判定标准：以各采砂场/可采区的平均差值 `AVG(Control_Elevation - Measured_Depth)` 为准，阈值为 2m。\n\n"
+            f"判定标准：以各采砂场/可采区的平均差值 `AVG({DB.CESHEN_CONTROL_ELEVATION} - {DB.CESHEN_MEASURED_DEPTH})` 为准，阈值为 2m。\n\n"
             f"本次从数据库检索到 **{len(rows)} 个** 采砂场/可采区，其中 **{len(over_rows)} 个** 判定为超深度开采。"
         )
         if over_rows:
@@ -568,7 +570,7 @@ class DataVisualizerTool(BaseTool):
 
         summary = (
             f"### 📊 **{title}**\n\n"
-            f"判定标准：以平均差值（AVG(Control_Elevation - Measured_Depth)）为准，阈值 2m。"
+            f"判定标准：以平均差值（AVG({DB.CESHEN_CONTROL_ELEVATION} - {DB.CESHEN_MEASURED_DEPTH})）为准，阈值 2m。"
             f"当前平均差值为 {round(float(avg_val), 3)}m，判定为：**{verdict}**。\n\n"
             f"- 平均差值：{round(float(avg_val), 3)}m（用于判定）\n"
             f"- 最大值：{round(float(max_val), 3)}m\n"

@@ -1,0 +1,90 @@
+# 知识库通用检索/聚合抽取规则（语料级配置）
+#
+# 设计：代码只实现通用机制（聚合 query 派生、父片回溯、同文档配额、grounded 引用校验、
+# 口径枚举），语料相关的术语/模板/单位/口径词全部在此声明，由 core/kb_rules.py 解释。
+# 修改语料只需改本文件，不需要改代码；本文件缺失时相关增强功能自动关闭（回退基础检索）。
+
+retrieval:
+  # 聚合语义词：命中即视为"计数/汇总类"问题，触发互补 query 派生与父片回溯
+  aggregation_terms:
+    [多少, 几个, 几处, 几块, 几项, 有几, 数量, 共计, 合计, 总计, 总共, 分别, 所有, 清单, 汇总, 统计, 共有]
+  # 互补 query 模板：{q} = 用户问题原文；用于把"总数/口径"类表述召回进来
+  aggregation_query_templates:
+    - "{q} 汇总 结论"
+    - "{q} 总数 合计 统计"
+  # child 切片命中后按章节路径上溯父切片（small-to-big），补齐上下文与总数表述
+  parent_expand: true
+  parent_expand_top: 3
+  # 同一文档最多保留条数（去冗余，避免单文档子片占满结果）
+  doc_quota: 3
+
+# 领域/语料档案：每档描述一类"聚合问答"的口径与召回模板
+profiles:
+  - name: yearly_plan_count
+    enabled: true
+    # 触发条件（全部满足）：含任一实体词 + 任一计数词
+    trigger:
+      entity_terms: [砂场, 采砂场, 采区, 可采区, 采砂]
+      count_terms: [多少, 几个, 有几, 数量, 统计, 共有, 共计]
+    # 定向检索路径的最低适用年度（许可类口径在此年份前以许可编号统计为准）
+    min_year: 2025
+    # 限定检索范围（知识库 project 文件夹）与召回模板
+    project: shishifangan
+    query_templates:
+      - "{county} {year} 实施方案 主要结论 涉及 可采区 可采点 数量"
+      - "{county} {year} 实施方案 采区基本情况 可采区 可采点"
+    # 计数口径：主口径单位（取总数）与次口径单位（一并报出）
+    count_units: [可采区, 采区]
+    secondary_units: [可采点]
+    # 口径判定：句中出现目标年度 → 本年度（即使引用规划报告）；无年度时需含本年度标记
+    current_year_markers: [本方案, 本年度, 年度计划]
+    # LLM 读数输出的本年度口径标签（代码据此筛选，避免代码内硬编码中文口径词）
+    llm_current_scope_label: 本年度
+    plan_markers: [规划报告, 采砂规划, 规划期]
+    # 无据时的确定性表述（避免编造数量）
+    no_evidence_template: "根据知识库资料，未找到 {county} {year} 年度可采区（砂场）数量的明确表述。"
+    # 许可类检索词模板（备用于确定性召回该县许可文档）：{abbr}=县许可缩写
+    fallback_query_template: "豫{abbr}砂许 {year} 采砂许可"
+    # 许可口径检索词仅适用于该年份及以前（采砂许可证 2023 年后停发，
+    # 更晚年度检索该词只会召回无关年份文档，权威口径改由年度方案检索承担）
+    fallback_query_max_year: 2023
+    # 许可文档标题模式：{abbr}/{year} 由引擎替换；用于从标题统计许可编号（语料命名规则，非代码硬编码）
+    permit_title_pattern: "豫{abbr}砂许[〔\\[]{year}[〕\\]]第[\\s_]*([0-9]+)[\\s_]*号"
+    # 口径语义读数提示词（LLM 兜底路径；{county}/{year} 占位，JSON 花括号原样保留）
+    llm_extract_prompt: |
+      以下是知识库检索到的 {county} {year} 年度相关片段（可能混入其他县市或规划期内容）。
+      任务：找出片段中所有「可采区/采区数量」表述，逐条列出，不要做任何求和。
+      每条输出四个字段：
+      - object：数量所属对象（河段名；全县总量则留空 ""）
+      - scope：该数量的口径，只能取以下枚举之一：
+        “本年度”={year} 年度方案的规划数量（如“{year}年度竹竿河计划开采6个可采区”“本方案共涉及14 个采区”，
+                  以及“根据《规划报告》，{year} 年计划…14 个可采区”这类含目标年度的句子——
+                  **只要句中出现目标年度，一律记为“本年度”，即使同时引用了规划类文件**）
+        “规划期”=多年规划总量且句中**无具体年度限定**（如“2022~2026”）
+        “历史年份”=往年数量
+        “运行状态”=已运行/已开采/联网等状态描述
+        “其他”
+      - count：数量（整数）
+      - sentence：原句摘录
+      注意：只看 {county} 的文档内容，忽略其他县市；次级点位单位（如可采点）不并入主口径统计。
+      只输出 JSON：{"items": [{"object": "", "scope": "本年度", "count": 0, "sentence": ""}]}，
+      没有相应数量表述时输出 {"items": []}
+    # 许可号前缀（编号类文案用）
+    permit_prefix: "豫{abbr}砂许〔{year}〕"
+    # 按标题统计许可编号时，优先展示的来源词（命中即排前）
+    source_prefer_terms: [监测评估意见]
+    # 回答文案模板（全部用户可见文案外置，代码只做占位替换）
+    answer_templates:
+      with_total: "根据《{source}》，{county} {year} 年度共规划 {n} 个可采区（砂场）{point_clause}{db_clause}。"
+      point_clause: "、{point} 个可采点"
+      db_match_clause: "，与数据库在册采区数一致"
+      db_clause: "，数据库在册 {db_n} 个采区"
+      default_source: "{county}{year}年度河道采砂实施方案"
+      sources_prefix: "\n\n📎 来源："
+      sources_more: " 等 {n} 篇文档"
+      xuke_range: "根据知识库采砂许可资料，{county} {year} 年共核发 {n} 个砂场采砂许可（{prefix}第 {a} 号至第 {b} 号）"
+      xuke_list: "根据知识库采砂许可资料，{county} {year} 年共核发 {n} 个砂场采砂许可（编号：{nums}）"
+      db_same: "数据库记录与该口径一致（{n} 个采区）"
+      db_only: "数据库记录共有 {n} 个砂场（采区）"
+    # 无数据 / 无据时的确定性表述
+    no_record_template: "根据知识库与数据库资料，{county} {year} 年没有新核发的采砂许可记录（数据库无该年份测深数据，知识库也未检索到 {year} 年采砂许可文档）。"

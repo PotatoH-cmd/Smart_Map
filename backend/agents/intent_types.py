@@ -1,3 +1,4 @@
+import re
 from enum import Enum
 from typing import List, Optional
 from pydantic import BaseModel, Field
@@ -51,6 +52,8 @@ class TaskStep(BaseModel):
     params: dict = Field(default_factory=dict, description="工具参数")
     reasoning: str = Field(..., description="执行该步骤的推理过程")
     expected_output: str = Field(..., description="期望的输出结果")
+    # Phase 2：原生 tool_call 的 id（FC 模式与 step_id 等价映射；旧 checkpoint 无此字段，默认 None 兼容）
+    tool_call_id: Optional[str] = Field(None, description="原生 tool_call 对应 id")
 
 
 class IntentResult(BaseModel):
@@ -81,6 +84,43 @@ INTENT_DESCRIPTIONS = {
     IntentType.CROSS_INTENT: "跨意图复合任务：涉及多种操作类型的复杂任务",
     IntentType.UNKNOWN: "未知意图：无法明确分类的任务",
 }
+
+
+# 信阳市各县（区）名 → (行政区全名, 采砂许可号缩写)。
+# 缩写依据知识库采砂许可文档标题（如"豫罗砂许〔2023〕第_01_号"）确定，
+# 用于构造确定性知识库检索词与许可号正则统计。
+COUNTY_XUKE_MAP = {
+    "浉河": ("浉河区", "浉"),
+    "平桥": ("平桥区", "信平"),
+    "罗山": ("罗山县", "罗"),
+    "潢川": ("潢川县", "潢"),
+    "光山": ("光山县", "光"),
+    "固始": ("固始县", "信固"),
+    "息县": ("息县", "息水"),
+    "商城": ("商城县", "商城"),
+    "新县": ("新县", "新"),
+}
+
+
+def extract_county_xuke(user_msg: str):
+    """从用户消息提取县名与年份，返回 (行政区全名, 许可缩写, 年份) 或 None。
+
+    县名按长度降序匹配，避免"息县"前缀等歧义；年份优先阿拉伯数字。
+    """
+    if not user_msg:
+        return None
+    county_key = None
+    for name in sorted(COUNTY_XUKE_MAP, key=len, reverse=True):
+        if name in user_msg:
+            county_key = name
+            break
+    if county_key is None:
+        return None
+    year_m = re.search(r"(20\d{2})", user_msg)
+    if not year_m:
+        return None
+    full, abbr = COUNTY_XUKE_MAP[county_key]
+    return full, abbr, year_m.group(1)
 
 
 TOOL_INTENT_MAPPING = {

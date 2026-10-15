@@ -24,7 +24,13 @@ class AgentState(TypedDict):
     cesium_commands:  Annotated[List[Dict], operator.add]
     charts:           Annotated[List[Dict], operator.add]
     report_url: Optional[str]
+    kb_sources: List[Dict]                                   # 知识库溯源引用（结构化）
     error: Optional[str]
+    react_rounds: int                                        # 图内 ReAct：已用观察轮数（覆盖语义）
+    react_last_added: bool                                   # 图内 ReAct：最近一轮是否追加步骤（观察路由依据）
+    _critic_feedback: Optional[str]                          # 评审反馈：待消费的修正指令（summarize 生成后清空）
+    _critic_issues: List[str]                                # 评审问题清单（日志/埋点用）
+    _critic_round: int                                       # 评审已用修正轮数（只增不减，防死循环）
 
 
 # ---------------------------------------------------------------------------

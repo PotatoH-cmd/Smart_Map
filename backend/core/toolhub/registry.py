@@ -11,6 +11,15 @@ from typing import Any, Dict, List, Optional
 
 from .loader import load_skills_yaml, load_tools_yaml, build_http_tool, build_mcp_server, build_skill
 from .models import ToolSpec
+from .param_validate import (
+    MODE_ENFORCE,
+    MODE_OFF,
+    blocking_issues,
+    format_issues,
+    validate_against,
+    validation_mode,
+    verification_report,
+)
 from .providers.http_tool import HTTPProvider
 from .providers.mcp import MCPProvider
 from .providers.native import NativeProvider
@@ -143,12 +152,39 @@ class ToolHub:
     def invoke(self, name: str, params: Dict[str, Any]) -> Dict[str, Any]:
         start = time.time()
         try:
-            result = self._dispatch_internal(name, params or {})
+            spec = self._specs.get(name)
+            params, failure = self._validate_params(spec, name, params)
+            result = failure if failure is not None else self._dispatch_internal(name, params or {})
         except Exception as e:
             logger.error(f"[toolhub] invoke {name} failed: {e}", exc_info=True)
             result = {"success": False, "data": None, "message": "", "error": str(e)}
         result.setdefault("elapsed_ms", int((time.time() - start) * 1000))
         return result
+
+    def _validate_params(self, spec, name: str,
+                         params: Dict[str, Any]):
+        """执行前参数 Schema 校验（Phase 1）。返回 (可用参数, 失败结果或 None)。
+
+        - 修复（coerce）总是生效；enforce 模式下 blocking 错误直接拒绝，不进入 provider；
+        - warn（默认）模式仅记录日志，附 _verification 报告供事件流展示。
+        """
+        if spec is None or validation_mode() == MODE_OFF:
+            return params, None
+        coerced, issues = validate_against(spec.parameters, params or {}, tool_name=name)
+        if not issues:
+            return coerced, None
+        blocking = blocking_issues(issues)
+        if blocking:
+            logger.warning(f"[toolhub] {name} 参数校验未通过: {format_issues(blocking)}")
+        else:
+            logger.info(f"[toolhub] {name} 参数校验告警: {format_issues(issues)}")
+        if blocking and validation_mode() == MODE_ENFORCE:
+            return coerced, {
+                "success": False, "data": None, "message": "",
+                "error": f"参数校验失败: {format_issues(blocking)}",
+                "_verification": verification_report(name, issues),
+            }
+        return coerced, None
 
     def _dispatch_internal(self, name: str, params: Dict[str, Any]) -> Dict[str, Any]:
         spec = self._specs.get(name)

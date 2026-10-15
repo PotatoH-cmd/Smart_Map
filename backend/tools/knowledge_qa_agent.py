@@ -96,7 +96,8 @@ class KnowledgeQAAgent:
 
         # Stage 2.5: 知识图谱检索（图谱通道）
         kg_result = None
-        is_entity_q = self._detect_entity_query(question, step1)
+        kg_on = os.environ.get("KG_TRIGGER", "on").lower() not in ("off", "0", "false")
+        is_entity_q = kg_on and self._detect_entity_query(question, step1)
         if is_entity_q:
             kg_result = self._graph_retrieval(question)
             thinking_steps.append({
@@ -365,10 +366,13 @@ class KnowledgeQAAgent:
         # 知识图谱结果
         kg_section = ""
         if kg_result and kg_result.get("success"):
+            n_rows = len(kg_result.get("raw_result") or [])
             kg_section = (
-                f"【知识图谱精确查询结果】\n"
+                f"【知识图谱精确查询结果】（{n_rows} 条）\n"
                 f"{kg_result.get('answer', '')}\n"
                 f"(Cypher 查询: {kg_result.get('cypher', '')})\n"
+                f"图谱数据来自知识库文档抽取的实体关系（每条节点均带文档/章节溯源）"
+                f"与 PostgreSQL 采砂场实测测量点。\n"
             )
 
         # 构建结构化数据摘要
@@ -415,6 +419,8 @@ class KnowledgeQAAgent:
 5. 如果确实不包含相关信息，如实告知，并列出参考资料中可能相关的内容摘要。
 6. 回答要简洁、准确，用中文。
 7. 每引用一个来源，标注 [来源N]。
+8. 若使用了知识图谱结果，需在答案中说明依据（图谱条数与所依据的文档），
+   不得把图谱中的实体关系当作无出处的结论。
 
 请回答："""
 
@@ -458,14 +464,37 @@ class KnowledgeQAAgent:
                 logger.info(f"[QA Agent] 检测到实体列举问题 (列举词: {pat})")
                 return True
 
-        # 如果提取到了地理实体且有属性查询
+        # 关系/归属类问法（「属于」「位于哪个县」「涉及」）
+        rel_patterns = [
+            r'属于', r'位于', r'在哪个', r'哪个县', r'哪些县', r'归属', r'涉及', r'关系',
+        ]
+        for pat in rel_patterns:
+            if re.search(pat, question):
+                logger.info(f"[QA Agent] 检测到关系归属问题 (关系词: {pat})")
+                return True
+
+        # 问题中出现图谱实体词典词（县区/河流名、采区后缀），即值得走图谱精确查询
+        if self._mentions_kg_entity(question):
+            logger.info("[QA Agent] 检测到图谱实体词")
+            return True
+
+        # 提取到了地理实体或属性词（原为 and，实测过严导致大量问题漏走图谱）
         ents = entities.get("entities", [])
         attrs = entities.get("attributes", [])
-        if ents and attrs:
-            logger.info(f"[QA Agent] 检测到实体+属性查询: entities={ents}, attrs={attrs}")
+        if ents or attrs:
+            logger.info(f"[QA Agent] 检测到实体/属性查询: entities={ents}, attrs={attrs}")
             return True
 
         return False
+
+    @staticmethod
+    def _mentions_kg_entity(question: str) -> bool:
+        """问题中是否出现图谱实体词典词（县区/河流/采区后缀）。"""
+        from kg_pipeline.normalize import AREA_SUFFIXES, COUNTIES, RIVERS
+
+        if any(c in question for c in COUNTIES) or any(r in question for r in RIVERS):
+            return True
+        return any(suf in question for suf in AREA_SUFFIXES)
 
     def _graph_retrieval(self, question: str) -> Optional[dict]:
         """
@@ -481,6 +510,10 @@ class KnowledgeQAAgent:
                 f"[QA Agent] 图谱检索: success={result.get('success')}, "
                 f"answer={str(result.get('answer', ''))[:80]}"
             )
+            # 0 条结果直接返回 None：避免把「未找到」块拼进提示词再让模型忽略
+            if not result.get("success") or not result.get("raw_result"):
+                logger.info("[QA Agent] 图谱查询无结果，回落纯向量检索")
+                return None
             return result
         except Exception as e:
             logger.error(f"[QA Agent] 图谱检索失败: {e}")

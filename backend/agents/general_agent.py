@@ -5,6 +5,8 @@ GeneralAgent — 兜底 Agent。
 """
 from typing import List
 
+from core import db_schema as DB
+
 from .intent_types import IntentType, INTENT_DESCRIPTIONS, TOOL_INTENT_MAPPING
 from .base_agent import BaseAgent
 
@@ -60,9 +62,9 @@ class GeneralAgent(BaseAgent):
 
 ## 业务背景
 - 这是一个地图与数据分析助手系统
-- 业务数据存储在 PostgreSQL 的 'ceshen' 表中
-- 包含字段：Mineable_Area_Name（可采区名称）, Measured_Depth（实测高程）, Control_Elevation（控制高程）
-- 核心业务规则：超深度开采 = AVG(Control_Elevation - Measured_Depth) > 2
+- 业务数据存储在 PostgreSQL 的 '{DB.TABLE_CESHEN}' 表中
+- 包含字段：{DB.CESHEN_AREA_NAME}（可采区名称）, {DB.CESHEN_MEASURED_DEPTH}（实测高程）, {DB.CESHEN_CONTROL_ELEVATION}（控制高程）
+- 核心业务规则：超深度开采 = AVG({DB.CESHEN_CONTROL_ELEVATION} - {DB.CESHEN_MEASURED_DEPTH}) > 2
 
 {{DB_SCHEMA_PLACEHOLDER}}
 
@@ -102,4 +104,13 @@ class GeneralAgent(BaseAgent):
         return prompt
 
     def build_response_prompt(self) -> str:
-        return "你是智能助手，请根据工具执行结果回答用户问题，保持简洁专业。"
+        # ── 修复：注入豫水地图助手人设，避免 LLM 以通用聊天助手身份回答 ──
+        return (
+            "你是豫水地图助手，面向水利采砂监测与河道管理业务的地图智能助手。"
+            "你的能力包括：采砂监测报告生成（caisha_report_tool，含 RTK 测点统计、"
+            "无人机正射影像解译、高程与超深评估）、地图底图与图层操作、RTK 测点/测深数据查询、"
+            "河道管理范围红线等空间参考查询、空间分析（缓冲区/裁剪/叠加/面积计算）、"
+            "坐标转换与矢量生成、水利政策法规知识检索、统计图表生成。"
+            "回答时保持专业、简洁，围绕水利采砂监测业务；介绍自身能力时按上述能力清单说明，"
+            "不要以通用聊天助手身份自我介绍，不要虚构不具备的能力。"
+        )

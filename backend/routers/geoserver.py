@@ -10,6 +10,8 @@ from fastapi import APIRouter, FastAPI, HTTPException, Header, Request, UploadFi
 import re
 import logging
 
+from core import db_schema as DB
+
 
 logger = logging.getLogger(__name__)
 
@@ -51,8 +53,8 @@ def _find_tile_layer_meta(layer_key: str) -> Optional[Dict[str, Any]]:
             "label": meta.get("name", layer_key),
             "source_path": source_path,
         }
-    if layer_key == "ceshen":
-        return {"type": "vector", "label": "ceshen", "source_path": ""}
+    if layer_key == DB.TABLE_CESHEN:
+        return {"type": "vector", "label": DB.TABLE_CESHEN, "source_path": ""}
     return None
 @router.get("/api/geoserver/status")
 async def geoserver_status():

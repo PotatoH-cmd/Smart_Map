@@ -123,6 +123,8 @@ native:
       knowledge_base_tool 参数格式：
       - 检索：{"operation": "search", "query": "用户问题核心关键词"}
       - 政策/流程/操作文档类问题必须走知识库检索，禁止查询数据库
+      - query 传用户问题的核心关键词即可，系统会自动多变体检索与迭代重查（Agent Search）
+      - 检索结果含 search_meta（轮次/查询词/评估结论），回答时可注明「经 N 轮检索」
 
   cesium_tool:
     intents: [map_display]

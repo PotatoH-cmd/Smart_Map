@@ -59,9 +59,9 @@ sys.path.insert(0, str(PROJECT_ROOT))
 sys.path.insert(0, str(SEG_DIR))
 sys.path.insert(0, str(SEG_DIR / "sam3"))
 
-from tools.resam_lora import inject_lora_to_vit, extract_lora_state_dict, LoRALinear
-from tools.resam_ssa import ReSAMSSA
-from tools.resam_losses import ReSAMLoss
+from tools.offline.resam_lora import inject_lora_to_vit, extract_lora_state_dict, LoRALinear
+from tools.offline.resam_ssa import ReSAMSSA
+from tools.offline.resam_losses import ReSAMLoss
 
 
 # ==============================
@@ -470,7 +470,7 @@ def train_resam(
                 parent = model
                 for p in parent_name.split('.'):
                     parent = getattr(parent, p)
-                from tools.resam_lora import LoRALinear
+                from tools.offline.resam_lora import LoRALinear
                 lora_linear = LoRALinear(module, rank=lora_rank, alpha=lora_alpha)
                 setattr(parent, attr_name, lora_linear)
                 lora_params.extend([lora_linear.lora_A, lora_linear.lora_B])
@@ -497,7 +497,7 @@ def train_resam(
     if resume_path and Path(resume_path).exists():
         ckpt = torch.load(resume_path, map_location=device)
         if 'lora' in ckpt:
-            from tools.resam_lora import load_lora_state_dict
+            from tools.offline.resam_lora import load_lora_state_dict
             load_lora_state_dict(model, ckpt['lora'])
         if 'ssa' in ckpt:
             ssa_module.load_state_dict(ckpt['ssa'], strict=False)

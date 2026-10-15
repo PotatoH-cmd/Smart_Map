@@ -2,15 +2,18 @@
 快速路由表加载器。从 JSON 配置文件读取关键词→意图映射，支持热重载。
 
 设计要点：
-- 首次加载及每次调用 load_fast_routes() 时检查文件 mtime
+- 首次加载及每次调用 load_fast_route_rules() 时检查文件 mtime
 - 若 JSON 文件不存在或格式错误，回退到内联默认值（JSON 为权威来源，default 兜底）
+- 规则可选声明「最小执行计划」（tool/params，3D 视图用 tool_cesium/params_cesium）。
+  未声明的规则不短路执行，由调用方回退到 LLM 规划 —— 避免空 execution_plan
+  导致不调用任何工具、由 LLM 凭空回答"已完成"。
 
 注意：为避免触发 agents/__init__.py 的级联导入，IntentType 在函数内部延迟导入。
 """
 import json
 import logging
 import os
-from typing import Any, List, Tuple
+from typing import Any, Dict, List, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -22,7 +25,8 @@ def _get_intent_type():
 
 
 # 内联默认路由表（JSON 文件 fast_routes.json 为权威来源；本表仅在 JSON 缺失/损坏时兜底）
-# 注意：使用字符串而非 IntentType 枚举值，避免模块级导入触发 agents/__init__.py 级联加载
+# 注意：使用字符串而非 IntentType 枚举值，避免模块级导入触发 agents/__init__.py 级联加载。
+# 内联默认不含最小执行计划，命中后由调用方回退 LLM 规划（不会产生空计划编造结果）。
 _DEFAULT_ROUTES: List[Tuple[str, str]] = [
     ("切换卫星", "map_display"),
     ("卫星图层", "map_display"),
@@ -85,55 +89,71 @@ _JSON_PATH = os.path.join(os.path.dirname(__file__), "fast_routes.json")
 
 # 热重载缓存：记录上次加载时的 mtime，避免每次查询都重新读取文件
 _cached_mtime: float = 0.0
-_cached_routes: List[Tuple[str, Any]] = []
+_cached_rules: List[Dict[str, Any]] = []
 
 
-def _resolve_default_routes() -> List[Tuple[str, Any]]:
-    """将字符串默认路由表转换为 (keyword, IntentType) 列表。"""
+def _resolve_default_routes() -> List[Dict[str, Any]]:
+    """将字符串默认路由表转换为规则字典列表。"""
     IntentType = _get_intent_type()
-    result: List[Tuple[str, Any]] = []
+    rules: List[Dict[str, Any]] = []
     for keyword, intent_str in _DEFAULT_ROUTES:
         try:
-            result.append((keyword, IntentType(intent_str)))
+            rules.append({
+                "keyword": keyword,
+                "intent": IntentType(intent_str),
+                "tool": None,
+                "params": {},
+                "tool_cesium": None,
+                "params_cesium": {},
+            })
         except ValueError:
             logger.warning(f"[fast_route_loader] 默认路由表含未知意图: '{intent_str}'")
-    return result
+    return rules
 
 
-def _parse_routes(data: dict) -> List[Tuple[str, Any]]:
-    """将 JSON 数据解析为 (keyword, IntentType) 列表。"""
+def _parse_routes(data: dict) -> List[Dict[str, Any]]:
+    """将 JSON 数据解析为规则字典列表（含可选的最小执行计划）。"""
     IntentType = _get_intent_type()
-    routes: List[Tuple[str, Any]] = []
+    rules: List[Dict[str, Any]] = []
     for item in data.get("routes", []):
-        keyword = item.get("keyword", "").strip()
-        intent_str = item.get("intent", "").strip()
+        keyword = str(item.get("keyword", "")).strip()
+        intent_str = str(item.get("intent", "")).strip()
         if not keyword or not intent_str:
             continue
         try:
             intent = IntentType(intent_str)
-            routes.append((keyword, intent))
         except ValueError:
             logger.warning(f"[fast_route_loader] 未知意图类型，已跳过: keyword='{keyword}', intent='{intent_str}'")
-    return routes
+            continue
+        rules.append({
+            "keyword": keyword,
+            "intent": intent,
+            "tool": item.get("tool") or None,
+            "params": dict(item.get("params") or {}),
+            "tool_cesium": item.get("tool_cesium") or None,
+            "params_cesium": dict(item.get("params_cesium") or {}),
+        })
+    return rules
 
 
-def load_fast_routes(force_reload: bool = False) -> List[Tuple[str, Any]]:
-    """加载快速路由映射表。
+def load_fast_route_rules(force_reload: bool = False) -> List[Dict[str, Any]]:
+    """加载快速路由规则（含可选最小执行计划）。
 
     默认使用 mtime 缓存：仅在 JSON 文件发生变更时重新读取。
     传 force_reload=True 可强制立即重新加载。
 
     Returns:
-        List[Tuple[str, IntentType]]: (关键词, 意图) 映射列表。
-        若 JSON 文件不可用，回退到内联默认值。
+        List[dict]: 规则列表，字段为
+        keyword / intent / tool / params / tool_cesium / params_cesium。
+        若 JSON 文件不可用，回退到内联默认值（其 tool 均为 None）。
     """
-    global _cached_mtime, _cached_routes
+    global _cached_mtime, _cached_rules
 
     if not os.path.exists(_JSON_PATH):
-        if _cached_routes:
+        if _cached_rules:
             # 之前加载过，文件被删除了 — 继续使用缓存
             logger.warning("[fast_route_loader] JSON 文件不存在，使用内存缓存")
-            return _cached_routes
+            return _cached_rules
         logger.warning(
             f"[fast_route_loader] JSON 文件不存在 ({_JSON_PATH})，回退到硬编码默认值"
         )
@@ -145,8 +165,8 @@ def load_fast_routes(force_reload: bool = False) -> List[Tuple[str, Any]]:
         logger.warning("[fast_route_loader] 无法读取 JSON 文件 mtime，使用硬编码默认值")
         return _resolve_default_routes()
 
-    if not force_reload and current_mtime <= _cached_mtime and _cached_routes:
-        return _cached_routes
+    if not force_reload and current_mtime <= _cached_mtime and _cached_rules:
+        return _cached_rules
 
     try:
         with open(_JSON_PATH, "r", encoding="utf-8") as f:
@@ -155,12 +175,13 @@ def load_fast_routes(force_reload: bool = False) -> List[Tuple[str, Any]]:
         logger.error(f"[fast_route_loader] JSON 解析失败: {e}，使用硬编码默认值")
         return _resolve_default_routes()
 
-    routes = _parse_routes(data)
-    if not routes:
+    rules = _parse_routes(data)
+    if not rules:
         logger.warning("[fast_route_loader] JSON 路由表为空，回退到硬编码默认值")
         return _resolve_default_routes()
 
     _cached_mtime = current_mtime
-    _cached_routes = routes
-    logger.info(f"[fast_route_loader] 已加载 {len(routes)} 条快速路由规则")
-    return routes
+    _cached_rules = rules
+    planned = sum(1 for r in rules if r["tool"])
+    logger.info(f"[fast_route_loader] 已加载 {len(rules)} 条快速路由规则（其中 {planned} 条含最小执行计划）")
+    return rules

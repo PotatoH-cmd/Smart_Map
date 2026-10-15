@@ -73,6 +73,47 @@ sequenceDiagram
 - **断线自愈** — Run 生命周期持久化，SSE 断线重连 + 事件流补拉 + 检查点恢复。
 - **生产就绪** — PM2 托管、每日备份、TTL 清理、内存淘汰，7×24 稳定运行。
 
+## 🆕 本次改动速览 · 工具调用加固与检索通用化
+
+> 一轮针对「模型如何请求工具」和「知识库怎么检索」的加固：从**计划式调用**补齐为**可校验的原生 tool_call**，并把领域规则从代码里外置成配置。新能力全部带灰度开关，默认保守、异常自动回退。
+
+### 🔧 工具调用：请求与执行分离，且全程可校验
+
+```mermaid
+flowchart LR
+    M["模型"] -->|"tools= 完整描述 + JSON Schema"| FC{"bind_tools"}
+    FC -->|"tool_calls（同一条消息可并行多个）"| A["fc_adapter<br/>tool_call → TaskStep"]
+    A -->|"参数 Schema 校验<br/>required / type / enum"| E["执行内核<br/>Tool Hub → 本地回退"]
+    E -->|"role:tool 回填 tool_call_id"| O["ReAct 观察<br/>信息不足可再追加调用"]
+    O --> M
+
+    style FC fill:#fef3c7,stroke:#b45309
+    style E fill:#dcfce7,stroke:#15803d
+```
+
+| 阶段 | 做了什么 | 开关（默认保守） |
+|------|----------|------------------|
+| **P1 参数校验** | 工具声明 → 标准 JSON Schema；执行前校验必填/类型/枚举，非法即拦并附同构校验报告 | `PARAM_VALIDATE_MODE=warn`（观察期）→ `enforce` |
+| **P2 原生调用** | 完整工具描述 + Schema 经 `tools=` 注入模型；模型直接输出 `tool_calls`，转换层映射为内部任务步骤 | `INTENT_FC_MODE=1` |
+| **P3 观测循环** | 结果以 `role:"tool"` 回填，模型自主决定续调或结束；白名单由「事后校验」升级为「只暴露这几个工具」 | `REACT_FC_MODE=1` |
+
+> [!NOTE]
+> 内部 `step_id` 语义（幂等键 / 检查点 / SSE 事件）完全保留 —— 断点续跑与防重复执行零改动；FC 解析异常自动回退原结构化输出路径。
+
+### 🔍 检索通用化：L1 召回增强 · L2 有据校验 · L3 规则外置
+
+| 层 | 能力 | 落点 | 与领域解耦方式 |
+|----|------|------|----------------|
+| **L1** | 父片回溯（small-to-big）、同文档配额去冗余、聚合问题自动派生互补 query 并 RRF 融合 | `tools/llamaindex_knowledge_tool.py` | 只依赖切片 metadata（`section_no`/`document_id`），不认业务术语 |
+| **L2** | 有据校验：结论数字与证据句必须能在检索原文中找到，否则改答「未找到明确表述」 | `core/grounded.py` | 与领域无关；编号类文本（如 `SGH4 采区`）不会被误判成数量 |
+| **L3** | 语料级规则外置：聚合词、query 模板、计数单位、口径词、回答文案、抽取提示词 | `config/kb_rules.yaml` + `core/kb_rules.py` | 换语料只改 YAML，代码内不再有中文正则与领域词表 |
+
+**同批修复与工程收敛**
+
+- 修掉知识库「空结果」判据读错字段导致的误报（此前每个知识库步骤都会被标「校验未通过」，实际召回正常）；
+- 许可已停发年度（2025+）不再生成无效的许可口径检索步骤，改由年度实施方案口径作答；
+- **DB schema 单一来源** `core/db_schema.py`：库表名/字段名收敛为唯一定义点，并与 PG 自动同步的 `config/db_schema.json` 做漂移校验（漂移只告警，不阻断）。
+
 ---
 
 ## 🏗️ 系统架构
@@ -203,7 +244,7 @@ flowchart LR
     I -->|知识检索| KA["KnowledgeAgent"]
     I -->|报告生成| RA["ReportAgent"]
     I -->|兜底闲聊| GA["GeneralAgent"]
-    MA & DA & KA & RA & GA --> T["工具中台 43 工具"]
+    MA & DA & KA & RA & GA --> T["工具中台 44 工具"]
     T --> R["RunEngine<br/>事件流 + 检查点"]
     R -->|map_commands| M2D["2D"]
     R -->|cesium_commands| M3D["3D"]
@@ -216,7 +257,7 @@ flowchart LR
     style RC fill:#ffe4e6,stroke:#e11d48
 ```
 
-13 个内置工具覆盖全链路，经工具中台统一注册后共 **43 个工具**可被调度：
+13 个内置工具覆盖全链路，经工具中台统一注册后共 **44 个工具**（含禁用项）可被调度：
 
 | 类别 | 工具 |
 |------|------|
@@ -309,9 +350,13 @@ Smart_Map/
 │   ├── config/                    # 目录化配置（SSoT）
 │   │   ├── tools.yaml             # 工具元数据 · MCP Server 声明 · HTTP 工具
 │   │   ├── intents.yaml           # 意图目录（13 意图）
+│   │   ├── kb_rules.yaml          # 知识库语料规则（聚合词/模板/口径/文案，SSoT）
 │   │   └── skills.yaml            # 复合技能编排
 │   ├── core/
-│   │   ├── toolhub/               # 工具中台：四类 Provider 注册/调用/发现
+│   │   ├── db_schema.py           # 库表/字段名单一来源（与 PG schema 漂移校验）
+│   │   ├── kb_rules.py            # 语料规则引擎（聚合派生/口径判定/计数抽取）
+│   │   ├── grounded.py            # 有据校验（结论必须见于检索原文）
+│   │   ├── toolhub/               # 工具中台：四类 Provider + 参数 Schema 校验
 │   │   └── intent/                # 通用意图服务核心（分析器 + 目录客户端）
 │   ├── services/
 │   │   ├── tool_hub_main.py       # Tool Hub 独立进程 :8011
@@ -324,11 +369,14 @@ Smart_Map/
 │   │   ├── run_store.py           # 三表持久化 · TTL 清理
 │   │   ├── context_manager.py     # 上下文预算 · 滚动压缩
 │   │   ├── fact_memory.py         # 用户事实记忆
+│   │   ├── fc_adapter.py          # 原生 tool_call ⇄ 内部任务步骤转换层
+│   │   ├── react_loop.py          # ReAct 观察循环（JSON 决策 / 原生 tool_call 双模）
+│   │   ├── providers/             # 领域特化策略注册表（KB 回退 · 计划纠正 · 确定性回答）
 │   │   └── agent_harness.py       # Agent 分派中枢
 │   ├── tools/
 │   │   ├── falcon_detect.py       # Falcon 检测流水线（影像/瓦片/融合/GeoJSON）
 │   │   ├── falcon_service.py      # Falcon 常驻推理服务 :8765
-│   │   ├── sam_predict.py         # SegEarth-OV-3 SAM3 变化检测
+│   │   ├── offline/               # 离线训练/推理脚本（不参与工具自动扫描）
 │   │   └── ...                    # 其余注册工具
 │   ├── scripts/
 │   │   ├── backup_memory.sh       # 每日备份（DB+向量+图谱）
@@ -507,6 +555,9 @@ GeoLibre 需独立部署（nginx 托管，默认 :8090），后端通过 `/api/g
 - [x] Falcon 开放词汇遥感识别（常驻服务 + 降级重试 + 精修）
 - [x] 联网搜索（DashScope Responses API · 带来源引用）
 - [x] 微服务工具中台（四类 Provider · MCP 自动发现 · 控制台试跑）+ 意图服务解耦
+- [x] 工具参数 Schema 校验（required/type/enum）+ 原生 tool_call 规划与观测循环（灰度开关 + 自动回退）
+- [x] 检索通用化：父片回溯 · 同文档配额 · 聚合 query 派生 + 有据校验（grounded）
+- [x] 语料规则外置（`kb_rules.yaml`）与 DB schema 单一来源（`db_schema.py`）
 - [ ] Kuzu 知识图谱摄取管线
 - [ ] 多用户体系与事实隔离
 - [ ] 语音交互
@@ -515,7 +566,7 @@ GeoLibre 需独立部署（nginx 托管，默认 :8090），后端通过 `/api/g
 
 ## 🤝 贡献与文档
 
-欢迎 Issue / PR。添加工具：在 `backend/tools/` 继承 `qwen_agent.tools.base.BaseTool` 即自动进入中台目录（需要意图路由/参数约束时在 `config/tools.yaml` 加一段元数据，最多 2 处），前端「工具中台」控制台可即时试跑；外部 REST API 直接在 `tools.yaml` 的 `http_tools` 段声明，零代码接入。添加 Agent：继承 `BaseAgent` → `_dispatch()` 分派 → LangGraph 加节点。所有提示词统一维护在 `backend/prompts.py`（SSoT 原则）。
+欢迎 Issue / PR。添加工具：在 `backend/tools/` 继承 `qwen_agent.tools.base.BaseTool` 即自动进入中台目录（需要意图路由/参数约束时在 `config/tools.yaml` 加一段元数据，最多 2 处），前端「工具中台」控制台可即时试跑；外部 REST API 直接在 `tools.yaml` 的 `http_tools` 段声明，零代码接入。添加 Agent：继承 `BaseAgent` → `_dispatch()` 分派 → LangGraph 加节点。所有提示词统一维护在 `backend/prompts.py`（SSoT 原则）；库表/字段名统一取自 `backend/core/db_schema.py`，知识库语料规则统一维护在 `backend/config/kb_rules.yaml`。
 
 深入文档：
 

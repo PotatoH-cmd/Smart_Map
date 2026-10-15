@@ -12,6 +12,7 @@ import pytest
 from agents.run_store import (
     RunStore, RunEvent, DEFAULT_DB_PATH,
     RUNNING, AWAITING_CONFIRMATION, AWAITING_INPUT, COMPLETED, FAILED, CANCELLED,
+    INTERRUPTED, RESUMING,
 )
 
 
@@ -199,3 +200,139 @@ def test_status_constants():
         "completed", "failed", "cancelled",
     }
     assert DEFAULT_DB_PATH.endswith("sessions.db")
+
+
+# ----------------------------------------------------------------------
+# 阶段8：宕机 watchdog（heartbeat / last_node / 老化判定）
+# ----------------------------------------------------------------------
+
+def test_heartbeat_and_last_node_columns(store):
+    store.create_run("r1", "s1", "msg")
+    store.update_heartbeat("r1", "tool:pg:1")
+    run = store.get_run("r1")
+    assert run["heartbeat_at"] is not None
+    assert run["last_node"] == "tool:pg:1"
+    # 再次更新覆盖
+    store.update_heartbeat("r1", "summarize")
+    assert store.get_run("r1")["last_node"] == "summarize"
+
+
+def test_is_stale_updated_at(store):
+    from datetime import datetime, timedelta, timezone
+    fresh = datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
+    old = (datetime.now(timezone.utc).astimezone() - timedelta(minutes=10))
+    old_iso = old.isoformat(timespec="seconds")
+    assert not store.is_stale_updated_at(fresh, max_age_seconds=300)   # 未超时
+    assert store.is_stale_updated_at(old_iso, max_age_seconds=300)     # 超时
+    assert store.is_stale_updated_at(None, 300)                        # 缺失视为过期
+    assert store.is_stale_updated_at("not-a-date", 300)                # 解析失败视为过期
+
+
+def test_find_stale_runs_and_mark_interrupted(store):
+    from datetime import datetime, timedelta, timezone
+    store.create_run("r1", "s1", "msg1")
+    store.create_run("r2", "s1", "msg2")
+    old = (datetime.now(timezone.utc).astimezone() - timedelta(minutes=10))
+    with __import__("sqlite3").connect(store.db_path) as conn:
+        conn.execute("UPDATE runs SET updated_at=? WHERE run_id='r1'", (old.isoformat(timespec="seconds"),))
+        conn.commit()
+    stale = store.find_stale_runs(300)
+    assert {r["run_id"] for r in stale} == {"r1"}   # r2 仍新鲜
+    store.mark_interrupted("r1")
+    assert store.get_run("r1")["status"] == INTERRUPTED
+    store.mark_resuming("r1")
+    assert store.get_run("r1")["status"] == RESUMING
+
+
+def test_get_last_run_by_session(store):
+    from datetime import datetime, timedelta, timezone
+    store.create_run("r1", "s1", "m1")
+    store.create_run("r2", "s1", "m2")
+    store.create_run("r3", "s9", "m3")
+    # r2 建立后手动把 updated_at 推后，确保排序确定性（同秒插入有平局）
+    later = (datetime.now(timezone.utc).astimezone() + timedelta(seconds=5))
+    with __import__("sqlite3").connect(store.db_path) as conn:
+        conn.execute("UPDATE runs SET updated_at=? WHERE run_id='r2'",
+                     (later.isoformat(timespec="seconds"),))
+        conn.commit()
+    last = store.get_last_run_by_session("s1")
+    assert last["run_id"] == "r2"   # 最近一次（按 updated_at 倒序）
+    assert store.get_last_run_by_session("no_such") is None
+
+
+# ----------------------------------------------------------------------
+# 阶段8：工具副作用幂等 key
+# ----------------------------------------------------------------------
+
+def test_idempotency_record_check(store):
+    store.record_idempotency_key("r1", 1, "hash-a")
+    store.record_idempotency_key("r1", 2, "hash-b")
+    assert store.check_idempotency_key("r1", 1) is True
+    assert store.check_idempotency_key("r1", 2) is True
+    assert store.check_idempotency_key("r1", 3) is False
+
+
+def test_idempotency_dedup_records_ignore_duplicate(store):
+    store.record_idempotency_key("r1", 1, "hash-a")
+    store.record_idempotency_key("r1", 1, "hash-a")   # 重复插入安全
+    store.record_idempotency_key("r1", 1, "hash-zzz")  # 同 (run,step) 不覆盖（INSERT OR IGNORE）
+    with __import__("sqlite3").connect(store.db_path) as conn:
+        n = conn.execute(
+            "SELECT COUNT(*) FROM idempotency_keys WHERE run_id='r1' AND step_id=1"
+        ).fetchone()[0]
+    assert n == 1
+    assert store.check_idempotency_key("r1", 1) is True
+
+
+def test_idempotency_cleanup(store):
+    store.record_idempotency_key("r1", 1, "a")
+    store.create_run("r1", "s1", "msg")  # 终态？
+    assert store.check_idempotency_key("r1", 1) is True
+    store.delete_idempotency_key("r1", 1)
+    assert store.check_idempotency_key("r1", 1) is False
+
+
+# ----------------------------------------------------------------------
+# 阶段8：route_meta 版本化（兼容旧 state_json）
+# ----------------------------------------------------------------------
+
+def test_route_meta_new_version_roundtrip(store):
+    from agents.context_route import read_route_meta, route_meta
+    state = {
+        "version": 1,
+        "stage_cursor": "tool:pg:1",
+        "route": {"tool:pg:1": route_meta("tool")},
+        "user_message": "查数据",
+        "tool_results": [{"tool_name": "postgresql_tool", "result": {"success": True}}],
+        "done_steps": [],
+        "remaining_steps": [],
+    }
+    store.create_run("r1", "s1", "查数据")
+    store.save_checkpoint("r1", state)
+    loaded = store.load_checkpoint("r1")
+    meta = read_route_meta(loaded)
+    assert meta["version"] == 1
+    assert meta["_legacy"] is False
+    assert meta["stage_cursor"] == "tool:pg:1"
+
+
+def test_route_meta_read_legacy_state_json(store):
+    """旧 checkpoint（无 version 字段）按旧语义解析，不报错。"""
+    from agents.context_route import read_route_meta
+    legacy = {
+        "user_message": "查数据",
+        "tool_results": [{"tool_name": "pg", "result": {"success": True}}],
+        "remaining_steps": [],
+        "done_steps": [1],
+        "pending": None,
+        "session_id": "s1",
+    }
+    store.create_run("r1", "s1", "查数据")
+    store.save_checkpoint("r1", legacy)
+    loaded = store.load_checkpoint("r1")
+    assert loaded == legacy  # 原样存取
+    meta = read_route_meta(loaded)
+    assert meta["version"] == 0
+    assert meta["_legacy"] is True
+    assert meta["stage_cursor"] == ""
+    assert meta["route"] == {}

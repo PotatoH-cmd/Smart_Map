@@ -30,6 +30,8 @@ from datetime import datetime
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
+from kb_pipeline import Manifest
+
 # ─────────────────────────────────────────────
 # 配置常量
 # ─────────────────────────────────────────────
@@ -383,28 +385,17 @@ def build_chunks(sections):
 # ─────────────────────────────────────────────
 # 入库
 # ─────────────────────────────────────────────
-def ingest(chunks, rebuild=False):
-    from tools.llamaindex_knowledge_tool import KnowledgeBaseTool
+def build_nodes(chunks):
+    """把切片渲染为 TextNode（含溯源与章节元数据）。"""
     from llama_index.core.schema import TextNode, NodeRelationship, RelatedNodeInfo
-
-    kb = KnowledgeBaseTool()
-    if not kb._ensure_initialized():
-        print("❌ LlamaIndex 初始化失败")
-        return False
-
-    if rebuild:
-        try:
-            kb._index.delete_ref_doc(DOC_ID, delete_from_docstore=True)
-            print(f"🗑  已删除旧文档节点 ref_doc={DOC_ID}")
-        except Exception as e:
-            print(f"（未找到旧节点或删除跳过：{e}）")
 
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     nodes = []
-    for idx, c in enumerate(chunks):
+    for c in chunks:
         meta = {
-            "title": f"{DOC_TITLE}｜{c['breadcrumb'].split(' > ')[-1]}",
+            "title": f"{DOC_TITLE}\uff5c{c['breadcrumb'].split(' > ')[-1]}",
             "document_id": DOC_ID,
+            "source_url": f"/api/knowledge/preview/{DOC_ID}",
             "project": PROJECT,
             "project_name": PROJECT_NAME,
             "chunk_type": c["chunk_type"],
@@ -422,17 +413,42 @@ def ingest(chunks, rebuild=False):
         node.excluded_llm_metadata_keys = list(meta.keys())
         node.relationships[NodeRelationship.SOURCE] = RelatedNodeInfo(node_id=DOC_ID)
         nodes.append(node)
+    return nodes
 
-    print(f"📥 准备插入 {len(nodes)} 个节点（向量化中，按 10 条/批）...")
-    kb._index.insert_nodes(nodes)
-    kb._index.storage_context.persist(persist_dir=kb._persist_dir)
-    print(f"✅ 已入库并持久化到：{kb._persist_dir}")
+
+def ingest(chunks, rebuild=False, manifest=None, dry_run=False):
+    """入库：默认走切片级增量 merge；rebuild=True 时整篇重建。"""
+    from kb_pipeline import Manifest, apply_incremental, full_rebuild
+
+    manifest = manifest or Manifest()
+    nodes = build_nodes(chunks)
+
+    if rebuild:
+        stats = full_rebuild(None, manifest, DOC_ID, DOC_TITLE, nodes,
+                             source_file=MD_PATH, source="ingest_script")
+        print(f"\U0001f4e5 {DOC_TITLE}\uff1a\u6574\u7bc7\u91cd\u5efa {stats['insert']} \u4e2a\u8282\u70b9")
+        return True
+
+    from tools.llamaindex_knowledge_tool import KnowledgeBaseTool
+
+    kb = KnowledgeBaseTool()
+    if not kb._ensure_initialized():
+        print("\u274c LlamaIndex \u521d\u59cb\u5316\u5931\u8d25")
+        return False
+
+    stats = apply_incremental(kb, manifest, DOC_ID, DOC_TITLE, nodes,
+                              source_file=MD_PATH, source="ingest_script",
+                              dry_run=dry_run)
+    tag = "dry-run " if dry_run else ""
+    print(f"\U0001f4e5 {DOC_TITLE}\uff1a{tag}keep={stats['keep']} "
+          f"insert={stats['insert']} delete={stats['delete']} "
+          f"\u5197\u4f59\u6e05\u7406={stats['redundant']}")
+    if not dry_run:
+        kb._index.storage_context.persist(persist_dir=kb._persist_dir)
+        print(f"\u2705 \u5df2\u5165\u5e93\u5e76\u6301\u4e45\u5316\u5230\uff1a{kb._persist_dir}")
     return True
 
 
-# ─────────────────────────────────────────────
-# 导出预览
-# ─────────────────────────────────────────────
 def export_json(chunks):
     os.makedirs(os.path.dirname(OUTPUT_JSON), exist_ok=True)
     payload = {
@@ -489,10 +505,12 @@ def main():
     export_json(chunks)
 
     if args.dry_run:
-        print("🧪 dry-run 完成，未入库。")
+        # 只算差分，不初始化向量库、不写任何数据
+        ingest(chunks, manifest=Manifest(), dry_run=True)
+        print("\U0001f9ea dry-run \u5b8c\u6210\uff08\u4ec5\u8ba1\u7b97\u5dee\u5206\uff0c\u672a\u5199\u5e93\uff09\u3002")
         return
 
-    ingest(chunks, rebuild=args.rebuild)
+    ingest(chunks, rebuild=args.rebuild, manifest=Manifest())
 
 
 if __name__ == "__main__":

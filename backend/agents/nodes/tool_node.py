@@ -16,9 +16,94 @@ from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
 
 from ..intent_types import IntentType, IntentResult, TaskStep
 from ..qgis_workflows import match_recipe, extract_params, substitute_params, RECIPES
+from ..providers import resolve_kb_fallback
 from ..state import AgentState, QwenToolAdapter
 
 logger = logging.getLogger(__name__)
+
+# 单工具步骤执行超时（秒）：本地 adapter 在进程内线程池执行时无内置超时，
+# 若无此兜底，单个工具（如 caisha_report_tool 内 dashscope 无 timeout 调用）可无限阻塞，
+# 整个 run 只能等外层 RUN_TIMEOUT_SECONDS(600s) 兜底，用户感知为"一直不出结果"。
+# 超时后返回明确失败结果，run 始终有终态。QGIS 重工作流步骤需更多时间，单独放宽。
+_TOOL_STEP_TIMEOUT = int(os.environ.get("TOOL_STEP_TIMEOUT_SECONDS", "240"))
+# qgis_mcp_tool 通用工作流步骤超时（相对更长，含多步 MCP 调用）
+_QGIS_WORKFLOW_TIMEOUT = int(os.environ.get("QGIS_WORKFLOW_TIMEOUT_SECONDS", "480"))
+
+# ── 采区名称归一化（红线距离分析用）：SHP 容器路径 /gis_data 的宿主机映射 ──
+_HOST_GIS_DIRS = [
+    "/home/szgczx/python/GIS",
+    "/home/server/python/GIS",
+]
+
+# 任务描述词：出现在要素名尾部时剥离（"郝楼采区砂场到最近河道" → "郝楼采区砂场"）
+_TASK_TAILS = ("到最近河道", "到最近红线", "距最近河道", "最近河道", "最近红线", "距红线")
+# 业务后缀：叠加在库名上的冗余写法（"XX采区采砂场" → "XX采区"）
+_BIZ_TAILS = ("采砂场", "砂场", "可采区", "采区", "可采点", "采点", "砂站")
+
+
+def _read_shp_names(shp_path: str) -> List[str]:
+    """读取 SHP 图层全部 Name 字段值（容器路径 /gis_data 自动映射到宿主机目录）。"""
+    if not shp_path:
+        return []
+    import sys
+    # PROJ 数据目录兜底（conda 环境被迁移后 PROJ_LIB 可能指向旧路径）
+    proj_lib = os.path.join(sys.prefix, "share", "proj")
+    if os.path.isdir(proj_lib):
+        os.environ.setdefault("PROJ_LIB", proj_lib)
+    host_path = shp_path
+    if not os.path.exists(host_path):
+        for host_dir in _HOST_GIS_DIRS:
+            cand = shp_path.replace("/gis_data", host_dir, 1)
+            if os.path.exists(cand):
+                host_path = cand
+                break
+    if not os.path.exists(host_path):
+        return []
+    try:
+        from osgeo import ogr
+        ogr.UseExceptions()
+        ds = ogr.Open(host_path)
+        if ds is None:
+            return []
+        lyr = ds.GetLayer(0)
+        return [str(f.GetField("Name")) for f in lyr if f.GetField("Name")]
+    except Exception as e:
+        logger.warning(f"[qgis_workflow] 读取 SHP 名称失败: {e}")
+        return []
+
+
+def _resolve_feature_name(raw_name: str, names: List[str]) -> str:
+    """名称归一化："郝楼采区砂场到最近河道" → "潢河郝楼村采区"。
+
+    逐层剥离任务描述词与业务后缀生成候选，在 SHP 名称列表中做唯一包含匹配；
+    多义（如"史河"命中多个名称）不猜，返回原样由调用方报明确错误。
+    """
+    if not raw_name or not names:
+        return raw_name
+    candidates: List[str] = []
+    cur = raw_name
+    while cur:
+        if cur not in candidates:
+            candidates.append(cur)
+        nxt = ""
+        for task in _TASK_TAILS:
+            if cur.endswith(task):
+                nxt = cur[:-len(task)].strip()
+                break
+        if not nxt:
+            for tail in _BIZ_TAILS:
+                if cur.endswith(tail):
+                    nxt = cur[:-len(tail)].strip()
+                    break
+        if nxt and nxt != cur:
+            cur = nxt
+            continue
+        break
+    for cand in candidates:
+        matches = [n for n in names if cand in n]
+        if len(matches) == 1:
+            return matches[0]
+    return raw_name
 
 
 class ToolNodeMixin:
@@ -39,34 +124,8 @@ class ToolNodeMixin:
                 normal_steps.append(s)
 
         async def _invoke_step(step, extra_params: Dict = None) -> Dict:
-            params = step.params or {}
-            if extra_params:
-                params.update(extra_params)
-            # 服务化路径：TOOL_HUB_URL 配置时统一走工具中台，失败回退进程内实例
-            hub_url = os.environ.get("TOOL_HUB_URL")
-            if hub_url:
-                try:
-                    resp = await asyncio.get_event_loop().run_in_executor(
-                        None,
-                        lambda: httpx.post(
-                            f"{hub_url.rstrip('/')}/v1/tools/{step.tool}/invoke",
-                            json={"params": params}, timeout=600.0),
-                    )
-                    resp.raise_for_status()
-                    result = resp.json()
-                    logger.info(f"[tool_node] Via tool-hub: {step.tool}, "
-                                f"success={result.get('success')}, {result.get('elapsed_ms', 0)}ms")
-                    return {"tool_name": step.tool, "result": result}
-                except Exception as e:
-                    logger.warning(f"[tool_node] tool-hub invoke failed for {step.tool}, "
-                                   f"fallback local: {e}")
-            adapter = self._get_tool_adapter(step.tool)
-            if adapter is None:
-                logger.warning(f"[tool_node] Tool not available: {step.tool}")
-                return {"tool_name": step.tool, "result": {"success": False, "error": f"工具 {step.tool} 不可用"}}
-            logger.info(f"[tool_node] Calling tool={step.tool}, params={params}")
-            loop = asyncio.get_event_loop()
-            return await loop.run_in_executor(None, adapter.invoke, params)
+            """薄包装：委托公共执行内核（observe_node / RunEngine._invoke_step 共用）。"""
+            return await self._invoke_single_step(state, step, extra_params)
 
         # ── 执行 qgis_mcp_tool 步骤（通过通用工作流引擎） ──
         qgis_results = []
@@ -82,7 +141,16 @@ class ToolNodeMixin:
         pre_steps = [s for s in normal_steps if s.tool != "report_generator_tool"]
         report_steps = [s for s in normal_steps if s.tool == "report_generator_tool"]
         pre_results = list(await asyncio.gather(*[_invoke_step(s) for s in pre_steps]))
+        # FC 步骤：tool_call_id 上浮到结果根（供观测器以 role:"tool" 协议回填；gather 顺序保留）
+        for _s, _r in zip(pre_steps, pre_results):
+            if getattr(_s, "tool_call_id", None) and isinstance(_r, dict):
+                _r["tool_call_id"] = _s.tool_call_id
         pre_results = await self._fallback_knowledge_search(pre_results, state["user_message"], _invoke_step)
+
+        # ── 知识库无结果 → 联网搜索回退（确定性决策，覆盖 /chat 非流式路径）──
+        # 原逻辑仅 DB 空→KB 回退，KB 也空时 LLM 会回复"无可用文档"；
+        # 此处补一步确定性联网搜索，与 RunEngine._decide_web_search_fallback 逻辑一致。
+        pre_results = await self._fallback_web_search(pre_results, state, intent_result, _invoke_step)
 
         report_results = []
         if report_steps:
@@ -101,6 +169,97 @@ class ToolNodeMixin:
         state["tool_results"] = qgis_results + pre_results + report_results
         return state
 
+    def _get_tool_parameters(self, tool_name: str) -> List[Dict[str, Any]]:
+        """工具声明的 parameters（类属性直读，不实例化工具）。未知工具返回 []。
+
+        供 schema 校验（_check_tool_params）与缺参检测（RunEngine._detect_missing_params）共用；
+        实现收敛到 core.toolhub.param_validate.local_tool_parameters（单一来源 + 幂等扫描缓存）。
+        """
+        from core.toolhub.param_validate import local_tool_parameters
+        return local_tool_parameters(tool_name)
+
+    def _check_tool_params(self, tool_name: str, params: Dict[str, Any]):
+        """参数 Schema 校验（Phase 1）：修复 → 校验。
+
+        返回 (可用参数, 失败结果或 None)：enforce 模式下 blocking 错误直接失败、不调用工具；
+        warn（默认）模式仅记录日志，修复结果照常生效。
+        """
+        from core.toolhub.param_validate import (
+            MODE_ENFORCE, MODE_OFF, blocking_issues, format_issues,
+            validate_against, validation_mode, verification_report,
+        )
+        if validation_mode() == MODE_OFF:
+            return params, None
+        declared = self._get_tool_parameters(tool_name)
+        if not declared:
+            return params, None
+        coerced, issues = validate_against(declared, params, tool_name=tool_name)
+        if not issues:
+            return coerced, None
+        blocking = blocking_issues(issues)
+        if blocking:
+            logger.warning(f"[tool_node] {tool_name} 参数校验未通过: {format_issues(blocking)}")
+        else:
+            logger.info(f"[tool_node] {tool_name} 参数校验告警: {format_issues(issues)}")
+        if blocking and validation_mode() == MODE_ENFORCE:
+            return coerced, {
+                "success": False,
+                "error": f"参数校验失败: {format_issues(blocking)}",
+                "_verification": verification_report(tool_name, issues),
+            }
+        return coerced, None
+
+    async def _invoke_single_step(self, state: AgentState, step, extra_params: Dict = None,
+                                  params_override: Dict = None) -> Dict[str, Any]:
+        """单步执行内核：TOOL_HUB_URL 外呼 → 本地 adapter 回退。
+
+        tool_node / observe_node / RunEngine._invoke_step 共用同一实现，
+        保证服务化路径（Tool Hub）与本地路径在所有执行路径中待遇一致。
+        - extra_params：追加参数并合并进 step.params（原有语义，逐字保留）
+        - params_override：调用方已完成参数归一化时传入（RunEngine 路径）
+        """
+        params = params_override if params_override is not None else (step.params or {})
+        if extra_params:
+            params.update(extra_params)
+        # ── 参数 Schema 校验（Phase 1）：修复 → 校验；enforce 下 blocking 直接失败（不调用工具）──
+        params, schema_failure = self._check_tool_params(step.tool, params)
+        if schema_failure is not None:
+            return {"tool_name": step.tool, "result": schema_failure}
+        # 服务化路径：TOOL_HUB_URL 配置时统一走工具中台，失败回退进程内实例
+        hub_url = os.environ.get("TOOL_HUB_URL")
+        if hub_url:
+            try:
+                resp = await asyncio.get_event_loop().run_in_executor(
+                    None,
+                    lambda: httpx.post(
+                        f"{hub_url.rstrip('/')}/v1/tools/{step.tool}/invoke",
+                        json={"params": params}, timeout=600.0),
+                )
+                resp.raise_for_status()
+                result = resp.json()
+                logger.info(f"[tool_node] Via tool-hub: {step.tool}, "
+                            f"success={result.get('success')}, {result.get('elapsed_ms', 0)}ms")
+                return {"tool_name": step.tool, "result": result}
+            except Exception as e:
+                logger.warning(f"[tool_node] tool-hub invoke failed for {step.tool}, "
+                               f"fallback local: {e}")
+        adapter = self._get_tool_adapter(step.tool)
+        if adapter is None:
+            logger.warning(f"[tool_node] Tool not available: {step.tool}")
+            return {"tool_name": step.tool, "result": {"success": False, "error": f"工具 {step.tool} 不可用"}}
+        logger.info(f"[tool_node] Calling tool={step.tool}, params={params}")
+        loop = asyncio.get_event_loop()
+        try:
+            return await asyncio.wait_for(
+                loop.run_in_executor(None, adapter.invoke, params),
+                timeout=_TOOL_STEP_TIMEOUT,
+            )
+        except asyncio.TimeoutError:
+            logger.error(f"[tool_node] Tool {step.tool} timed out after {_TOOL_STEP_TIMEOUT}s")
+            return {"tool_name": step.tool,
+                    "result": {"success": False,
+                               "error": f"工具 {step.tool} 执行超时（超过 {_TOOL_STEP_TIMEOUT}s 未返回结果，已终止）"}}
+
     async def _execute_qgis_workflow(self, state: AgentState, step) -> Dict[str, Any]:
         """通用 QGIS 工作流引擎。
 
@@ -117,9 +276,16 @@ class ToolNodeMixin:
         # 1. 匹配 recipe
         recipe_name, recipe = match_recipe(user_msg)
         if not recipe:
-            # 无匹配 recipe → 透传给 MCP（LLM 已指定 category/action）
+            # 无匹配 recipe → 透传给 MCP（LLM 已指定 category/action），带超时防阻塞
             loop = asyncio.get_event_loop()
-            raw = await loop.run_in_executor(None, adapter.invoke, step.params or {})
+            try:
+                raw = await asyncio.wait_for(
+                    loop.run_in_executor(None, adapter.invoke, step.params or {}),
+                    timeout=_QGIS_WORKFLOW_TIMEOUT,
+                )
+            except asyncio.TimeoutError:
+                logger.error(f"[qgis_workflow] 透传调用超时（>{_QGIS_WORKFLOW_TIMEOUT}s）")
+                return {"success": False, "error": f"GIS 工具执行超时（超过 {_QGIS_WORKFLOW_TIMEOUT}s）"}
             return raw.get("result", raw) if isinstance(raw, dict) else {"success": True, "data": raw}
 
         logger.info(f"[qgis_workflow] Matched: {recipe_name}")
@@ -135,6 +301,18 @@ class ToolNodeMixin:
                 if d is not None:
                     variables[pname] = d
         logger.info(f"[qgis_workflow] Vars: {json.dumps({k:v for k,v in variables.items() if k!='user_msg'}, ensure_ascii=False)}")
+
+        # ── 修复：feature_name 归一化提前到步骤执行前 ──
+        # 用户口语名称（"郝楼砂场"）与 SHP 正式名（"潢河郝楼村采区"）常有出入，
+        # export 的 Name LIKE 过滤会匹配 0 要素，导致 buffer/original 全空、
+        # 前端报"无可用要素"且回复谎报成功。此处读 SHP 名称做唯一包含匹配归一化，
+        # buffer / distance_to_redline 等所有 recipe 统一受益。
+        if variables.get("feature_name") and variables.get("shp_path"):
+            _names = _read_shp_names(variables["shp_path"])
+            _norm = _resolve_feature_name(variables["feature_name"], _names)
+            if _norm and _norm != variables["feature_name"]:
+                logger.info(f"[qgis_workflow] 名称归一化: {variables['feature_name']!r} → {_norm!r}")
+                variables["feature_name"] = _norm
 
         # 3. MCP 调用辅助
         def _call_mcp(params: Dict) -> Dict:
@@ -199,6 +377,14 @@ class ToolNodeMixin:
                         json.dump({"type": "FeatureCollection", "features": features}, f)
                     results["combined_geojson"] = f"/static/geojson/{out_fname}"
                     logger.info(f"[qgis_workflow] Combined: {out_full} ({len(features)} features)")
+                else:
+                    # ── 修复：0 要素视为失败，禁止生成空图层指令与谎报成功 ──
+                    results["success"] = False
+                    results["error"] = (
+                        f"SHP 中未匹配到 '{variables.get('feature_name', '')}' 的要素，"
+                        "缓冲区生成失败，请确认名称后重试"
+                    )
+                    logger.warning(f"[qgis_workflow] Combine: 0 features，filter 未匹配任何要素")
             except Exception as e:
                 logger.warning(f"[qgis_workflow] Combine failed: {e}")
 
@@ -219,6 +405,36 @@ class ToolNodeMixin:
                 feat_path = _os.path.join(geojson_dir, _os.path.basename(feat_fname))
                 with open(feat_path) as f:
                     feat_gj = json.load(f)
+
+                # 1b) ── 修复：导出 0 要素（filter 未匹配）时的名称归一化重试 ──
+                # 意图 LLM 提取的采区名（"郝楼采区砂场"）与 SHP 正式名（"潢河郝楼村采区"）
+                # 常有出入，export 的 Name LIKE 过滤匹配不到要素，原逻辑直接
+                # features[0] 抛 list index out of range，导致 $distance 未渲染、
+                # 前端加载空连线图层。此处从 SHP 读名称做唯一包含匹配归一化后重导出。
+                if not feat_gj.get("features"):
+                    norm_name = _resolve_feature_name(
+                        variables.get("feature_name", ""),
+                        _read_shp_names(variables.get("shp_path", "")),
+                    )
+                    source_layer_id = variables.get("source_layer_id", "")
+                    if norm_name and norm_name != variables.get("feature_name") and source_layer_id:
+                        logger.info(
+                            f"[qgis_workflow] 名称归一化: {variables.get('feature_name')!r} → {norm_name!r}"
+                        )
+                        variables["feature_name"] = norm_name
+                        _call_mcp({"category": "layer", "action": "export", "params": {
+                            "layer_id": source_layer_id,
+                            "output_path": feat_fname,
+                            "filter_expression": f"Name LIKE '%{norm_name}%'",
+                            "target_crs": "EPSG:4326",
+                        }})
+                        with open(feat_path) as f:
+                            feat_gj = json.load(f)
+                if not feat_gj.get("features"):
+                    raise ValueError(
+                        f"SHP 中未匹配到与 '{variables.get('feature_name', '')}' 对应的采区要素，"
+                        "请确认采区名称后重试"
+                    )
 
                 # 2) 从 overlay_tile_service 获取红线 shapely 几何（EPSG:3857）
                 hx_layer = get_layer("hx")
@@ -262,9 +478,16 @@ class ToolNodeMixin:
                 logger.info(f"[qgis_workflow] 最近红线距离: {min_dist:.1f}m, 连线: {out_fname}")
             except Exception as e:
                 logger.warning(f"[qgis_workflow] distance_to_redline 失败: {e}")
+                results["success"] = False
+                results["error"] = str(e)
 
         # 6. 结果
-        msg = substitute_params(recipe.get("result_message", "操作完成。"), variables)
+        if results.get("error"):
+            # ── 修复：失败时输出明确错误信息，避免占位符残留与谎报成功 ──
+            feat = variables.get("feature_name", "") or "该要素"
+            msg = f"抱歉，对{feat}执行空间分析失败：{results['error']}。请确认名称后重试。"
+        else:
+            msg = substitute_params(recipe.get("result_message", "操作完成。"), variables)
         results["message"] = msg
         results["data"] = {k: v for k, v in variables.items() if k != "user_msg"}
 
@@ -281,7 +504,7 @@ class ToolNodeMixin:
                 full = _os.path.join(geojson_dir, fname)
                 if _os.path.exists(full):
                     geo = f"/static/geojson/{fname}"
-        if geo:
+        if geo and not results.get("error"):
             results["map_command"] = self._build_render_command(recipe, variables, geo)
         return results
 
@@ -334,6 +557,38 @@ class ToolNodeMixin:
         if not has_db_query:
             return pre_results
 
+        # ── 知识库回退策略注册表：定主题定向检索（如方案年份）──
+        # 领域定制的定向检索与检索词覆盖收敛到 providers/kb_fallback 注册表，
+        # 此处只负责调度：先定向检索（命中即在空库判断前提前返回），
+        # 空库时再用其检索词覆盖。
+        def _make_plan_llm():
+            from langchain_openai import ChatOpenAI
+            return ChatOpenAI(
+                model=self.llm_cfg.get("model", "qwen-plus"),
+                base_url=self.llm_cfg.get("model_server") or self.llm_cfg.get("base_url"),
+                api_key=self.llm_cfg.get("api_key", ""),
+                temperature=0,
+            )
+
+        targeted, custom_query = await resolve_kb_fallback(
+            user_message, pre_results,
+            invoke_step=_invoke_step, llm_factory=_make_plan_llm,
+        )
+        if targeted:
+            pre_results.extend(targeted)
+            return pre_results
+
+        # ── 去重守卫：计划里已含知识库步骤且成功返回时不再重复回退检索 ──
+        # （否则"双工具计划"场景下同问题会被检索两次：计划内一次 + 空库回退一次）
+        if any(
+            r.get("tool_name") == "knowledge_base_tool"
+            and isinstance(r.get("result"), dict)
+            and r["result"].get("success")
+            and r["result"].get("data")
+            for r in pre_results
+        ):
+            return pre_results
+
         db_data_is_empty = False
         for r in pre_results:
             if r.get("tool_name") not in db_tool_names:
@@ -342,7 +597,14 @@ class ToolNodeMixin:
             if not isinstance(result, dict):
                 continue
             if result.get("success") is not True:
-                # DB 查询失败（网络/语法错误等），也应回退
+                # ── 修复：参数/调用类执行错误如实上报，不回退知识库 ──
+                # 意图 LLM 常生成缺参数的 SQL/工具调用（如 spatial_query 缺
+                # spatial_table），若视为"查询无结果"回退知识库，用户会看到
+                # 一堆无关文档引用和编造的失败结论。仅连接/服务类故障才回退。
+                err = str(result.get("error") or result.get("message") or "")
+                if any(k in err for k in ("必须指定", "不支持的操作", "缺少", "参数", "语法", "syntax")):
+                    return pre_results
+                # DB 查询失败（网络/连接错误等），也应回退
                 db_data_is_empty = True
                 break
             data = result.get("data")
@@ -370,6 +632,10 @@ class ToolNodeMixin:
             f"[tool_node] 数据库查询无结果，自动回退到知识库检索，query={user_message[:80]}"
         )
 
+        # ── 空库回退检索词：优先使用 Provider 注册表给出的检索词覆盖 ──
+        # （如砂场统计类问题改用"豫X砂许 YYYY 采砂许可"模板词，由 SandfieldKbProvider.query_for 提供）
+        kb_query = custom_query or user_message
+
         # 构造 knowledge_base_tool 的假 step 用于调用
         from dataclasses import dataclass
 
@@ -381,7 +647,7 @@ class ToolNodeMixin:
 
         fake_step = _FakeStep(
             tool="knowledge_base_tool",
-            params={"operation": "search", "query": user_message},
+            params={"operation": "search", "query": kb_query, "top_k": 20},
         )
         try:
             kb_result = await _invoke_step(fake_step)
@@ -394,6 +660,99 @@ class ToolNodeMixin:
             logger.warning(f"[tool_node] 知识库回退检索失败: {e}")
 
         return pre_results
+
+    async def _fallback_web_search(
+        self, pre_results: List[Dict], state: Dict[str, Any],
+        intent_result: IntentResult, _invoke_step
+    ) -> List[Dict]:
+        """知识库检索无结果时改用联网搜索；返回补充后的结果列表。
+
+        触发条件（全部满足）：知识类意图；计划中有 knowledge_base_tool 且全部结果为空；
+        其他工具未产出实质性结果；尚未执行过联网搜索；用户原问题非空。
+        与 RunEngine._decide_web_search_fallback 逻辑保持一致。
+        """
+        _WEB_FALLBACK_INTENTS = ("knowledge_search", "unknown", "cross_intent")
+        primary = getattr(intent_result, "primary_intent", None)
+        primary_val = primary.value if hasattr(primary, "value") else str(primary or "")
+        if primary_val not in _WEB_FALLBACK_INTENTS:
+            return pre_results
+
+        kb_results = [
+            r for r in pre_results
+            if isinstance(r, dict) and r.get("tool_name") == "knowledge_base_tool"
+        ]
+        if not kb_results:
+            return pre_results
+        if any(
+            isinstance(r, dict) and r.get("tool_name") == "web_search_tool"
+            for r in pre_results
+        ):
+            return pre_results
+        if any(not self._kb_result_empty(r.get("result")) for r in kb_results):
+            return pre_results  # 知识库有结果 → 不需要联网
+        others = [
+            r for r in pre_results
+            if isinstance(r, dict) and r.get("tool_name") != "knowledge_base_tool"
+        ]
+        if any(self._has_substantive_result(r) for r in others):
+            return pre_results  # 其他工具已产出实质结果
+        query = (state.get("user_message") or "").strip()
+        if not query:
+            return pre_results
+
+        logger.info(f"[tool_node] 知识库无结果，自动联网搜索: query={query[:80]}")
+
+        from dataclasses import dataclass
+
+        @dataclass
+        class _FakeWebStep:
+            tool: str = "web_search_tool"
+            params: dict = None
+            step_id: int = 9998
+
+        fake_step = _FakeWebStep(
+            tool="web_search_tool",
+            params={"query": query},
+        )
+        try:
+            ws_result = await _invoke_step(fake_step)
+            logger.info(
+                f"[tool_node] 联网搜索回退完成: success={ws_result.get('result', {}).get('success')}"
+            )
+            pre_results.append(ws_result)
+        except Exception as e:
+            logger.warning(f"[tool_node] 联网搜索回退失败: {e}")
+
+        return pre_results
+
+    @staticmethod
+    def _kb_result_empty(result) -> bool:
+        """知识库检索结果是否为'空'（成功但无内容）。失败（执行错误）不算空。"""
+        if not isinstance(result, dict) or result.get("success") is not True:
+            return False
+        data = result.get("data")
+        if isinstance(data, (list, dict)) and data:
+            return False
+        if str(result.get("content") or "").strip():
+            return False
+        return True
+
+    @staticmethod
+    def _has_substantive_result(item) -> bool:
+        """工具步骤是否已产出实质性结果（成功且有数据/命令/产物/答案）。"""
+        if not isinstance(item, dict):
+            return False
+        result = item.get("result")
+        if not isinstance(result, dict) or result.get("success") is not True:
+            return False
+        data = result.get("data")
+        if data not in (None, [], {}, ""):
+            return True
+        return bool(
+            result.get("map_commands") or result.get("map_command")
+            or result.get("charts") or result.get("report_url")
+            or result.get("answer") or result.get("content")
+        )
 
     @staticmethod
     def _is_empty_aggregate(data: List) -> bool:

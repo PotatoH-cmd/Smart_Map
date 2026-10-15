@@ -25,6 +25,19 @@ try:
 except Exception:  # noqa: BLE001
     pass
 
+# 修复 PROJ 数据库版本冲突：conda 环境 share/proj/proj.db 为旧版（GDAL 无法读取），
+# 统一指向 rasterio 自带的 proj_data（与 GDAL/rasterio 同版本打包），保证 CRS 解析正常。
+# 必须在任何 rasterio/GDAL 导入之前设置。
+try:
+    import importlib.util
+    _rasterio_spec = importlib.util.find_spec("rasterio")
+    if _rasterio_spec and _rasterio_spec.submodule_search_locations:
+        _proj_data = os.path.join(list(_rasterio_spec.submodule_search_locations)[0], "proj_data")
+        if os.path.isdir(_proj_data):
+            os.environ["PROJ_DATA"] = _proj_data
+except Exception:  # noqa: BLE001
+    pass
+
 # 在导入 torch 或 transformer 之前检查显卡设置
 cuda_devices = os.environ.get("CUDA_VISIBLE_DEVICES", "Not Set")
 logging.info(f"Current CUDA_VISIBLE_DEVICES: {cuda_devices}")
@@ -114,7 +127,21 @@ async def lifespan(app: FastAPI):
     app.state.run_cleanup_task = asyncio.create_task(_daily_run_cleanup())
     task_executor = build_task_executor()
     bot = build_legacy_agent()
+    # 启动即强制启动 watchdog（而非惰性）：此前 watchdog 仅在首次 start/resume 时触发，
+    # 若服务在长任务中意外重启（如 PM2 内存上限/OOM 杀掉进程），悬挂的 RUNNING run 无新消息
+    # 永远不会被清理或恢复，用户感知为"一直不出结果"。启动期扫描一次即可把它们标记 INTERRUPTED。
+    try:
+        task_executor.run_engine.start_watchdog()
+        logger.info("[lifespan] watchdog(启动期) 已启动，将恢复失活 run")
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"[lifespan] watchdog 启动失败: {e}")
     yield
+    # 可观测性：退出前冲刷 LangFuse 上报队列
+    try:
+        from core.obs import shutdown as _obs_shutdown
+        _obs_shutdown()
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"[lifespan] obs shutdown failed: {e}")
 
 
 app = FastAPI(title="Map Assistant API", version="1.0.0", lifespan=lifespan)
@@ -172,6 +199,7 @@ from routers.memory import router as memory_router
 from routers.falcon import router as falcon_router
 from routers.runs import router as runs_router
 from routers.sessions import router as sessions_router
+from routers.obs import router as obs_router
 
 app.include_router(chat_router)
 app.include_router(files_router)
@@ -183,6 +211,7 @@ app.include_router(memory_router)
 app.include_router(falcon_router)
 app.include_router(runs_router)
 app.include_router(sessions_router)
+app.include_router(obs_router)
 
 # 模块加载时自动注册已有 3D Tiles 数据集与自定义栅格图层
 from services.tile_manager import _auto_register_existing_3dtiles_async  # noqa: E402

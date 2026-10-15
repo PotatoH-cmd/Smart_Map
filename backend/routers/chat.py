@@ -35,6 +35,9 @@ def _is_explicit_map_request(user_content: str) -> bool:
         "地图", "上图", "加载", "图层", "定位", "跳转", "飞到", "显示到地图",
         "加载到地图", "标记", "标注", "打点", "落点", "经纬度", "卫星图", "底图",
         "切换", "卫星", "清除",
+        # 导航/地名查找类请求：location_search 会产出 set_view，属明确的地图请求。
+        # 缺失这些词会导致 2D 下工具已执行但地图命令被静默抑制（视角不动）。
+        "飞往", "飞至", "flyto", "fly to", "导航到", "查找位置", "搜索位置", "位置搜索",
         # qgis_mcp_tool 产出结果也需要地图展示
         "中心点", "缓冲区", "buffer", "裁剪", "clip",
         # 空间分析类结果也需要地图展示
@@ -77,6 +80,7 @@ class ChatResponse(BaseModel):
     cesium_commands: List[Dict[str, Any]] = []
     charts: List[Dict[str, Any]] = []
     report_url: Optional[str] = None
+    sources: List[Dict[str, Any]] = []
     intent_info: Optional[Dict[str, Any]] = None
 def _extract_text_content(content) -> str:
     """从消息内容中提取纯文本。若为多模态数组，取第一个 text 部分。"""
@@ -86,18 +90,176 @@ def _extract_text_content(content) -> str:
                 return part.get("text", "")
         return ""
     return content or ""
-async def _ocr_image(image_url: str) -> str:
+# ── 坐标表专用 OCR 提示词 ──
+# 拐点坐标表（点号/X/Y 列，可能分左右两个子表）若用通用"纯文字"提示词，
+# VLM 会把表格拍平成乱序流式文本，X/Y 配对全错；此提示词要求每行一个拐点，
+# 并用量级提示（X≈7位北坐标、Y≈8位东坐标）帮助 VLM 修正右子表的 Y/X 列序。
+COORD_TABLE_OCR_PROMPT = (
+    "你是坐标表格解析工具。图片中有一张拐点坐标表（含点号、X、Y 列，可能分为左右两个子表）。"
+    "请理解表格结构，将每个拐点按行输出为：点号 X值 Y值（一行一个拐点，用空格分隔，"
+    "只输出数值行，不要表头、标题或任何其他文字）。"
+    "输出格式严格要求每行恰好三个值（点号 X值 Y值），绝对禁止把每个数字单独输出为一行。"
+    "X 是北坐标（7位左右），Y 是东坐标（8位左右，3开头）。"
+)
+
+
+def _classify_xy_pair(a: float, b: float):
+    """按数值量级把一对数归一化为 [X(北坐标), Y(东坐标)]；无法分类返回 None。"""
+    def _is_northing(v):
+        return 3_200_000 <= abs(v) <= 4_500_000
+
+    def _is_easting(v):
+        return 18_000_000 <= abs(v) <= 40_000_000
+
+    if _is_northing(a) and _is_easting(b):
+        return [a, b]
+    if _is_easting(a) and _is_northing(b):
+        return [b, a]
+    return None
+
+
+def _parse_coord_table_rows(text: str) -> dict:
+    """把结构化 OCR 输出解析为 {点号: [X, Y]}（横向行优先，纵向列表回退）。
+
+    横向模式：每行两个大数（6~9 位含小数）按量级分类为 [X, Y]，带点号的行
+    按其点号，无点号的行续接到缺失的点号上（右子表常无点号列）。
+    纵向模式：VLM 偶发把"每行一个拐点"理解成"每个单元格单独一行"
+    （点号/X/Y 表头后逐行一个数字），此时拍平所有数字 token，按
+    「点号(1~99整数) + 北坐标 + 东坐标」滑动窗口重建三元组。
+    两种模式取解析点数多者；连续重复对去重（防 VLM 复读最后一行）。
+    """
+    def _finalize(rows):
+        if not rows:
+            return {}
+        numbered = {no: pair for no, pair in rows if no is not None}
+        unnumbered = [pair for no, pair in rows if no is None]
+        if unnumbered:
+            total = len(rows)
+            missing = [i for i in range(1, total + 1) if i not in numbered]
+            for pair, no in zip(unnumbered, missing):
+                numbered.setdefault(no, pair)
+        return numbered
+
+    # ── 横向行解析 ──
+    h_rows = []
+    last_pair = None
+    for raw_line in (text or "").splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        bigs = re.findall(r"\d{6,9}(?:\.\d+)?", line)
+        if len(bigs) != 2:
+            continue
+        try:
+            pair = _classify_xy_pair(float(bigs[0]), float(bigs[1]))
+        except ValueError:
+            continue
+        if pair is None:
+            continue
+        if pair == last_pair:
+            continue  # 连续重复（VLM 复读）
+        last_pair = pair
+        remainder = re.sub(r"\d{6,9}(?:\.\d+)?", " ", line)
+        smalls = [int(x) for x in re.findall(r"(?<![\d.])\d{1,3}(?![\d.])", remainder)]
+        h_rows.append((smalls[0] if smalls else None, pair))
+    h_result = _finalize(h_rows)
+    if len(h_result) >= 3:
+        return h_result
+
+    # ── 纵向列表解析（每行一个数字的拍平序列）──
+    tokens = []
+    for raw_line in (text or "").splitlines():
+        for m in re.finditer(r"\d{1,9}(?:\.\d+)?", raw_line.strip()):
+            tokens.append(m.group())
+    v_rows = []
+    last_pair = None
+    i = 0
+    while i + 2 < len(tokens):
+        try:
+            no_f = float(tokens[i])
+        except ValueError:
+            i += 1
+            continue
+        if no_f != int(no_f) or not (1 <= int(no_f) <= 99):
+            i += 1
+            continue
+        try:
+            pair = _classify_xy_pair(float(tokens[i + 1]), float(tokens[i + 2]))
+        except ValueError:
+            i += 1
+            continue
+        if pair is None:
+            i += 1
+            continue
+        if pair == last_pair:
+            i += 1
+            continue
+        v_rows.append((int(no_f), pair))
+        last_pair = pair
+        i += 3
+
+    v_result = _finalize(v_rows)
+    return v_result if len(v_result) >= len(h_result) else h_result
+
+
+async def _ocr_coord_table_consensus(image_url: str) -> str:
+    """坐标表 OCR：3 次并行结构化提取 + 逐点号多数表决。
+
+    qwen-vl-ocr 单次输出不稳定（可能读错个别值、复读最后一行、点号缺失），
+    3 次并行（耗时约等于 1 次）后按点号对 (X, Y) 做多数表决，返回
+    「点号 X值 Y值」文本行。全部失败或点数 < 3 时返回空串。
+    """
+    results = await asyncio.gather(
+        _ocr_image(image_url, system_prompt=COORD_TABLE_OCR_PROMPT),
+        _ocr_image(image_url, system_prompt=COORD_TABLE_OCR_PROMPT),
+        _ocr_image(image_url, system_prompt=COORD_TABLE_OCR_PROMPT),
+        return_exceptions=True,
+    )
+    parsed_runs = []
+    for t in results:
+        if isinstance(t, BaseException) or not t:
+            continue
+        parsed = _parse_coord_table_rows(t)
+        if parsed:
+            parsed_runs.append(parsed)
+
+    if not parsed_runs:
+        logger.warning("[OCR] 坐标表 3 次提取均失败")
+        return ""
+
+    voted = {}
+    for no in sorted({no for r in parsed_runs for no in r}):
+        cands = [tuple(r[no]) for r in parsed_runs if no in r]
+        if not cands:
+            continue
+        best = max(set(cands), key=cands.count)
+        voted[no] = best
+
+    if len(voted) < 3:
+        logger.warning(f"[OCR] 坐标表表决后点数不足: {len(voted)}")
+        return ""
+    logger.info(f"[OCR] 坐标表共识完成: {len(voted)} 个拐点")
+    return "\n".join(f"{no} {x} {y}" for no, (x, y) in sorted(voted.items()))
+
+
+async def _ocr_image(image_url: str, system_prompt: Optional[str] = None) -> str:
     """使用 qwen-vl-ocr 专用模型从图片中提取文字内容。
     
     image_url 可以是：
     - 本地路径（如 /static/uploads/xxx.png），会自动转为 base64 data URL
     - 完整 HTTP(S) URL（DashScope 需要能访问）
+    system_prompt 可定制（如坐标表结构化提取），缺省为纯文字提取。
     """
     # 将本地路径转为 base64 data URL（DashScope 无法访问内网地址）
     if image_url.startswith('/'):
-        local_path = os.path.join(os.path.dirname(__file__), image_url.lstrip('/'))
+        # URL /static/uploads/xxx.jpg → 本地 backend/static/uploads/xxx.jpg
+        # UPLOAD_DIR 即 backend/static，URL 中的 static/ 前缀需剥离，避免双重拼接
+        rel = image_url.lstrip('/')
+        if rel.startswith('static/'):
+            rel = rel[len('static/'):]
+        local_path = os.path.join(UPLOAD_DIR, rel)
         if not os.path.isfile(local_path):
-            # 尝试相对于 static 目录
+            # 兼容：非 static 前缀的 URL 直接相对 UPLOAD_DIR 解析
             local_path = os.path.join(UPLOAD_DIR, image_url.lstrip('/'))
         if os.path.isfile(local_path):
             with open(local_path, 'rb') as f:
@@ -125,7 +287,11 @@ async def _ocr_image(image_url: str) -> str:
                 "messages": [
                     {
                         "role": "system",
-                        "content": "你是一个精确的文字提取工具。只输出图片中的纯文字内容，不要添加任何坐标框、边框标记、位置标注或额外说明。保持原始格式、精度和顺序。"
+                        "content": system_prompt or (
+                            "你是一个精确的文字提取工具。只输出图片中的纯文字内容，"
+                            "不要添加任何坐标框、边框标记、位置标注或额外说明。"
+                            "保持原始格式、精度和顺序。"
+                        ),
                     },
                     {
                         "role": "user",
@@ -153,9 +319,13 @@ async def _ocr_image(image_url: str) -> str:
         return text
 async def _preprocess_excel(file_url: str) -> str:
     """使用 openpyxl 解析 Excel 文件，将表格数据格式化为文本。"""
-    local_path = os.path.join(os.path.dirname(__file__), file_url.lstrip('/'))
+    # URL /static/uploads/xxx.xlsx → 本地 backend/static/uploads/xxx.xlsx
+    rel = file_url.lstrip('/')
+    if rel.startswith('static/'):
+        rel = rel[len('static/'):]
+    local_path = os.path.join(UPLOAD_DIR, rel)
     if not os.path.isfile(local_path):
-        # 尝试相对于 static 目录
+        # 兼容：非 static 前缀的 URL 直接相对 UPLOAD_DIR 解析
         local_path = os.path.join(UPLOAD_DIR, file_url.lstrip('/'))
     if not os.path.isfile(local_path):
         logger.error(f"[Excel] 文件不存在: {file_url} -> {local_path}")
@@ -196,6 +366,10 @@ async def _preprocess_message_images(messages: list) -> list:
             continue
 
         text_content = msg.get('content', '')
+        # 坐标类意图（坐标/拐点 + 转换/矢量/加载等）使用坐标表结构化 OCR，
+        # 否则通用"纯文字"OCR 会把表格拍平成乱序文本导致 X/Y 配对全错
+        coord_intent = ("坐标" in text_content or "拐点" in text_content) and any(
+            k in text_content for k in ("转换", "矢量", "加载", "范围", "上图", "地图"))
         all_results = []
         for file_url in attachments:
             is_excel = file_url.lower().endswith(('.xlsx', '.xls'))
@@ -213,7 +387,10 @@ async def _preprocess_message_images(messages: list) -> list:
             elif is_image:
                 logger.info(f"[OCR] 开始处理图片: {file_url}")
                 try:
-                    ocr_text = await _ocr_image(file_url)
+                    if coord_intent:
+                        ocr_text = await _ocr_coord_table_consensus(file_url)
+                    else:
+                        ocr_text = await _ocr_image(file_url)
                     if ocr_text.strip():
                         all_results.append(ocr_text)
                 except Exception as e:
@@ -331,6 +508,7 @@ async def chat(request: ChatRequest, x_session_id: Optional[str] = Header(defaul
                 cesium_commands=result.get("cesium_commands", []),
                 charts=optimized_charts,
                 report_url=result.get("report_url"),
+                sources=result.get("sources", []) or result.get("kb_sources", []),
                 intent_info=intent_info
             )
 
@@ -592,7 +770,7 @@ async def chat_stream(request: ChatRequest, x_session_id: Optional[str] = Header
                             run_id = rid
                             logger.info(f"[stream] resume input run={rid} supplied={list(supplied.keys())}")
                     if task is not None:
-                        # 补参/确认消息本身不含地图关键词（如"ceshen"），但原始请求
+                        # 补参/确认消息本身不含地图关键词（如表名/图层名），但原始请求
                         # 已判定为地图意图；用 checkpoint 中的原始 user_message 做
                         # 地图命令优化判定，避免 resume 场景误抑制 map_commands。
                         ckpt = store.load_checkpoint(rid)
@@ -601,12 +779,22 @@ async def chat_stream(request: ChatRequest, x_session_id: Optional[str] = Header
                         logger.info(f"[stream] pending run={rid} 未匹配 resume 规则，另起新 run")
 
                 if task is None:
-                    run_id = str(uuid.uuid4())
-                    task = await engine.start(
-                        run_id=run_id, session_id=thread_id, user_message=user_text,
-                        chat_history=messages[:-1],
-                        view_hint=request.active_view,
-                    )
+                    # 阶段8：宕机断点续传懒检查 → 命中则自动 resume 该会话残留 run
+                    try:
+                        recover = await engine.recover_session(thread_id)
+                    except Exception as e:
+                        logger.warning(f"[stream] session recover skipped: {e}")
+                        recover = None
+                    if recover is not None:
+                        task, run_id = recover
+                        logger.info(f"[stream] auto resume crashed run={run_id}")
+                    else:
+                        run_id = str(uuid.uuid4())
+                        task = await engine.start(
+                            run_id=run_id, session_id=thread_id, user_message=user_text,
+                            chat_history=messages[:-1],
+                            view_hint=request.active_view,
+                        )
 
                 yield sse_payload({
                     "type": "status", "stage": "run_started",

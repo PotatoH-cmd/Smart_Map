@@ -2,7 +2,7 @@
 
 > 本文说明 `map_assistant_v1/backend/agents` 目录下的 **Agent Harness（调度中枢）架构**：它由哪些部件组成、彼此如何协作、一次 `/chat` 请求如何在其中流转，以及当前实现中几个需要留意的实现细节。
 >
-> 配套文档：`LangGraph节点状态说明.md`（聚焦 LangGraph 三节点与状态流转），本文与其互补，聚焦 **Harness 这一层的职责与装配关系**。
+> 配套文档：`LangGraph节点状态说明.md`（聚焦 LangGraph 七节点与状态流转，§19 为 P1 协同机制详解），本文与其互补，聚焦 **Harness 这一层的职责与装配关系**。
 
 ---
 
@@ -26,7 +26,11 @@
 | `base_agent.py` | Agent 抽象基类 | 规定每个领域 Agent 必须提供 `intent` / `tool_names` / 两个 prompt |
 | `map_agent.py` 等 | 领域 Agent | 各自持有领域工具集与领域提示词（地图 / 数据 / 知识 / 报告 / 兜底） |
 | `agent_harness.py` | **调度中枢** | 快速路由、意图→Agent 分派、提示词组装、系统上下文注入 |
-| `task_executor.py` | LangGraph 编排器 | 定义三节点图、执行节点、路由状态、汇总输出、流式推送 |
+| `task_executor.py` | LangGraph 编排器 | 定义七节点图、执行节点、路由状态、汇总输出 |
+| `run_engine.py` | 流式执行引擎 | `/chat/stream` 单驱动：可中断/恢复/取消的 run 生命周期 + 事件流 |
+| `react_loop.py` | ReAct 观察器 | 领域无关的“结果→追加单步”决策（图与流式共用，见 §8） |
+| `critic.py` | 质量评审器 | 回复文本的 LLM 语义评审 + 降级（图与流式共用，见 §8） |
+| `rules_gateway.py` | 验证层 | 工具 preflight/postflight 确定性校验链（与 critic 正交，见 §8） |
 
 各 Agent 与其覆盖意图：
 
@@ -48,17 +52,24 @@ flowchart TB
         U[用户 /chat 请求]
     end
 
-    U --> M[main.py\nUSE_INTENT_AGENT=true 时接管]
-    M --> TE[TaskExecutor\nLangGraph 编排器]
+    U --> M[routers/chat.py\nUSE_INTENT_AGENT=true 时接管]
+    M -->|非流式 /chat| TE[TaskExecutor\nLangGraph 编排器]
+    M -->|流式 /chat/stream| RE[RunEngine\n流式执行引擎]
 
-    subgraph GRAPH[LangGraph 三节点图]
+    subgraph GRAPH[LangGraph 七节点图]
         IN[intent_node] --> RT{路由}
         RT --> TN[tool_node]
-        RT --> RN[response_node]
-        TN --> RN
+        TN --> OB[observe_node\n可自环]
+        OB --> EX[extract_node]
+        EX --> SM[summarize_node]
+        SM --> CR[critic_node\n可回环]
+        CR -.打回.-> SM
+        RT --> SM
+        RT --> CF[confirmation_node]
     end
 
     TE --> IN
+    RE -. 复用同一套节点函数 .-> IN
 
     subgraph HARNESS[AgentHarness 调度中枢]
         FR[快速关键词路由\ntry_fast_classify]
@@ -69,8 +80,8 @@ flowchart TB
 
     IN -->|先问快速路由| FR
     IN -->|未命中则调| IA[IntentAgent\nLLM 结构化输出 IntentResult]
-    RN -->|取响应话术| PP
-    RN -->|注入当前时间| SC
+    SM -->|取响应话术| PP
+    SM -->|注入当前时间| SC
 
     DP --> AGS[领域 Agent 集合\nMap/Data/Knowledge/Report/General]
     PP --> AGS
@@ -104,7 +115,7 @@ flowchart TB
 
 ### 4.4 系统上下文注入 `get_system_context`
 
-- 生成「当前时间 + 星期（北京时间）」文本，注入到 `response_node` 的 system prompt，确保 LLM 能回答时间相关问题。
+- 生成「当前时间 + 星期（北京时间）」文本，注入到 `summarize_node` 的 system prompt，确保 LLM 能回答时间相关问题。
 
 ---
 
@@ -119,7 +130,7 @@ sequenceDiagram
     participant TR as ToolRegistry
     participant T as 工具实例
 
-    FE->>TE: execute / execute_stream(user_message)
+    FE->>TE: execute(user_message)（非流式）/ RunEngine.start()（流式）
     TE->>H: try_fast_classify(msg)
     alt 命中快速路由
         H-->>TE: IntentType(0.95)
@@ -138,6 +149,9 @@ sequenceDiagram
     end
     TE->>H: build_response_prompt_for / get_system_context
     TE->>IA: LLM 汇总工具结果为自然语言
+    opt 命中评审触发（知识搜索 / 报告类）
+        TE->>IA: critic 四维度语义评审（不通过→携反馈重生成一次）
+    end
     TE-->>FE: response + map_commands + charts + report_url
 ```
 
@@ -147,9 +161,11 @@ sequenceDiagram
 | --- | --- |
 | `intent_result is None` | 直接 `END` |
 | `confidence < 0.3` | 写兜底回复，直接 `END` |
-| `requires_confirmation` | 生成确认文案，进 `response_node` |
-| `execution_plan` 无工具 | 进 `response_node` 直接回答 |
-| 有需要的工具 | 进 `tool_node` 并发执行 |
+| `requires_confirmation` | 生成确认文案，进 `confirmation_node` |
+| `execution_plan` 无工具 | 进 `summarize_node` 直接回答 |
+| 有需要的工具 | 进 `tool_node` 并发执行（之后：observe → extract → summarize → critic） |
+
+> 完整图路由（含 observe 自环与 critic 评审回环）见《LangGraph节点状态说明.md》§19。
 
 ---
 
@@ -172,7 +188,28 @@ sequenceDiagram
 
 ---
 
-## 8. 当前实现中值得注意的点
+## 8. P1 协同机制：ReAct 观察 + Critic 评审（2026-09 新增）
+
+除 §4 的四类 Harness 能力外，执行层还有两个**领域无关的协同组件**，同时服务于图路径（非流式）与 RunEngine 路径（流式）：
+
+| 组件 | 文件 | 作用 | 领域化方式 |
+| --- | --- | --- | --- |
+| ReAct 观察器 `ReActObserver` | `react_loop.py` | 工具结果出来后再“多看一眼”：信息不够时由 LLM 决策追加**一步**只读工具，直到 finish 或轮数上限 | 白名单 = `harness.get_tool_names(intent_result) ∩ DEFAULT_READONLY_TOOLS`（知识库/数据库/联网搜索三只读工具）；交集为空直接跳过（地图类意图零开销） |
+| 质量评审器 `ResponseCritic` | `critic.py` | 回复生成后按四维度（事实一致性/来源标注/完整性/无过度承诺）做 LLM 语义评审，不通过打回重生成 | 触发条件确定性：意图 ∈ {知识搜索、报告生成} 或 工具 ∈ {知识库、报告生成、采砂报告}，且工具执行成功 |
+
+两者与既有验证层的分工（**两层正交**）：
+
+| 维度 | RulesGateway（`rules_gateway.py`） | Critic（`critic.py`） |
+| --- | --- | --- |
+| 判定对象 | 结构化事实（文件、列表、CRS、路径） | 自由文本 vs 结构化结果的**语义对照** |
+| 判定方式 | 确定性规则链（preflight/postflight） | LLM 语义评审（可降级） |
+| 失败处理 | critical → fail-fast 跳过依赖步骤 | 打回重生成（默认最多 1 次修正）或保守放行 |
+
+> 完整机制（触发矩阵、循环安全三层保护、事件与埋点）见《LangGraph节点状态说明.md》§19。
+
+---
+
+## 9. 当前实现中值得注意的点
 
 > 这些不是 bug，而是接手维护时容易误解、需要留心的实现现状。
 
@@ -181,15 +218,15 @@ sequenceDiagram
 
 2. **响应阶段确实走 Harness。** `_get_response_system_prompt` 通过 `harness.build_response_prompt_for` 取各领域的响应话术，失败时回退到硬编码映射。
 
-3. **`tool_node` 的并发在节点内部，不是 LangGraph 图级并行。** 并发由 `asyncio.gather` / `asyncio.as_completed` 实现；状态字段虽用 `Annotated[List, operator.add]` 预留了合并能力，但图拓扑仍是单入口三节点。
+3. **`tool_node` 的并发在节点内部，不是 LangGraph 图级并行。** 并发由 `asyncio.gather` / `asyncio.as_completed` 实现；`Annotated[List, operator.add]` 合并能力现被 `observe_node` 自环追加单条结果使用（详见 §8 与《LangGraph节点状态说明.md》§19.2）。
 
-4. **流式接口绕开了编译后的图。** `execute_stream()` 手动顺序调用 `_intent_node`/`_tool_node`/`_response_node` 以便细粒度 `yield` 进度卡片；`self._graph.ainvoke()` 仅用于非流式 `execute()`。二者共享同一套节点函数。
+4. **流式接口绕开了编译后的图，由 RunEngine 单独驱动。** `/chat/stream` 统一走 `RunEngine`（可中断/恢复/取消，事件经 EventBus 落 RunStore 后由 SSE 转发）；`self._graph.ainvoke()` 仅用于非流式 `execute()`。二者共享同一套节点函数与协同组件（ReActObserver / ResponseCritic）。
 
 5. **`GeneralAgent` 是安全网。** 任何未被专职 Agent 覆盖的意图都落到它，开放全部工具并使用完整原始 prompt，保证不退化。
 
 ---
 
-## 9. 如何扩展
+## 10. 如何扩展
 
 | 想做的事 | 改动点 |
 | --- | --- |
@@ -198,9 +235,11 @@ sequenceDiagram
 | 新增高频免 LLM 命令 | 往 `FAST_ROUTE_KEYWORDS` 加关键词 → 意图 |
 | 新增意图类型 | 在 `intent_types.py` 增加 `IntentType` 枚举、描述与工具映射 |
 | 让意图阶段用领域 prompt | 在 `intent_node` 里改为把 `harness.build_system_prompt_for(...)` 传入 `IntentAgent.analyze(system_prompt=...)` |
+| 调整 ReAct 观察范围 | 改 `react_loop.py` 的 `DEFAULT_READONLY_TOOLS`（全局只读安全集）或领域 Agent 的 `tool_names`（交集决定观察白名单） |
+| 调整评审触发范围 | 改 `critic.py` 的 `_REVIEW_INTENTS` / `_REVIEW_TOOLS` 常量与 `CRITIC_*` 环境变量 |
 
 ---
 
-## 10. 一句话总结
+## 11. 一句话总结
 
-> **Harness 架构的精髓是「分派 + 解耦」：`AgentHarness` 负责把请求快速导向正确的领域 Agent 和工具集，`TaskExecutor` 负责用 LangGraph 把「识别 → 调工具 → 汇总」三段式流水线跑通，各领域的规则和工具则由可插拔的 Agent 与 ToolRegistry 各自承载。**
+> **Harness 架构的精髓是「分派 + 解耦」：`AgentHarness` 负责把请求快速导向正确的领域 Agent 和工具集；`TaskExecutor`（图）与 `RunEngine`（流式）用同一套节点函数与协同组件（ReActObserver / ResponseCritic）把「识别 → 调工具 → 观察补步 → 抽取 → 汇总 → 评审」流水线跑通；各领域的规则和工具则由可插拔的 Agent 与 ToolRegistry 各自承载，工具操作安全由 RulesGateway 确定性规则链把关。**

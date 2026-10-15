@@ -5,7 +5,7 @@ db_validators.py — 数据查询类工具校验（postgresql_tool / knowledge_b
 - check_aggregate_zero：聚合查询全零 → warning（可能是合法结果，提示即可；逻辑自 _is_empty_aggregate 迁入）
 - check_kb_content_empty：知识库检索 content 为空 → critical（无可用知识，触发下游兜底）
 """
-from typing import Any, Dict, List
+from typing import Dict, List
 
 from ..rules_gateway import RISK_CRITICAL, RISK_WARNING, Check
 
@@ -49,14 +49,23 @@ def check_aggregate_zero(result: Dict, state: Dict) -> List[Check]:
 
 
 def check_kb_content_empty(result: Dict, state: Dict) -> List[Check]:
-    """知识库检索成功但无内容。critical：无可用知识。"""
+    """知识库检索成功但无内容。critical：无可用知识。
+
+    判据必须与检索实现对齐：knowledge_base_tool 的检索结果放在 `data`（切片列表），
+    **不写** 顶层 `content`。历史上只读 `content` 导致「任何知识库步骤都被判为空」的
+    误报（前端时间线出现"校验未通过：知识库检索未返回有效内容"，而实际召回正常）。
+    此处与 react_loop._kb_result_empty / tool_node 的空判定语义保持一致：
+    data 或 content 任一有实质内容即不算空。
+    """
     if not isinstance(result, dict) or not result.get("success"):
         return []
-    content = result.get("content") or ""
-    if not str(content).strip():
-        return [Check(
-            code="kb_empty", name="知识库结果为空", passed=False,
-            detail="知识库检索未返回有效内容",
-            severity=RISK_CRITICAL,
-        )]
-    return []
+    data = result.get("data")
+    if isinstance(data, (list, dict)) and data:
+        return []
+    if str(result.get("content") or "").strip():
+        return []
+    return [Check(
+        code="kb_empty", name="知识库结果为空", passed=False,
+        detail="知识库检索未返回有效内容",
+        severity=RISK_CRITICAL,
+    )]

@@ -7,6 +7,8 @@ const PLACEHOLDERS = {
   table_name: '如：cai_sha_table',
   demand: '请描述你的具体需求',
   coordinates: '如：113.5, 34.7',
+  layer: '如：卫星影像 / 街道图 / 2025年高分影像',
+  basemap: '如：卫星影像 / 街道图 / 天地图',
 };
 
 /**

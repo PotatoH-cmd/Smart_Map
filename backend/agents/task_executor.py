@@ -29,20 +29,26 @@ logger = logging.getLogger(__name__)
 
 from .nodes.intent_node import IntentNodeMixin
 from .nodes.tool_node import ToolNodeMixin
+from .nodes.observe_node import ObserveNodeMixin
+from .nodes.critic_node import CriticNodeMixin
 from .nodes.extract_node import ExtractNodeMixin
 from .nodes.summarize_node import SummarizeNodeMixin
 from .nodes.serialize import OutputSerializationMixin
+from .critic import ResponseCritic  # P1：回答质量评审组件（summarize ⇄ critic 闭环）
 
 
-class TaskExecutor(IntentNodeMixin, ToolNodeMixin, ExtractNodeMixin, SummarizeNodeMixin, OutputSerializationMixin):
+class TaskExecutor(IntentNodeMixin, ToolNodeMixin, ObserveNodeMixin, CriticNodeMixin, ExtractNodeMixin, SummarizeNodeMixin, OutputSerializationMixin):
     def __init__(self, llm_cfg: Dict[str, Any]):
         self.llm_cfg = llm_cfg
         self.intent_agent = IntentAgent(llm_cfg)
         self.tool_registry = ToolRegistry()
         self.harness = AgentHarness(llm_cfg)       # 调度中枢
         self._tool_instances: Dict[str, QwenToolAdapter] = {}
+        import threading
+        self._tool_instances_lock = threading.Lock()
         self._memory = MemorySaver()          # 进程内存储，内存操作 <1ms
         self._memory_max_threads = 200        # MemorySaver 线程数上限（超出按最近活跃淘汰）
+        self.critic = ResponseCritic(summarize_fn=self._summarize_tool_result)  # P1：质量评审（异常→放行）
 
         # 构建 LangGraph 图
         self._graph = self._build_graph(llm_cfg)
@@ -80,11 +86,14 @@ class TaskExecutor(IntentNodeMixin, ToolNodeMixin, ExtractNodeMixin, SummarizeNo
     # ------------------------------------------------------------------
 
     def _get_tool_adapter(self, tool_name: str) -> Optional[QwenToolAdapter]:
-        if tool_name not in self._tool_instances:
-            instance = self._create_tool(tool_name)
-            if instance is None:
-                return None
-            self._tool_instances[tool_name] = QwenToolAdapter(instance, tool_name)
+        # 加锁防并行竞态：run_engine 并行步骤同时首次请求同一工具时，
+        # 无锁会创建多个实例 → knowledge_base_tool 等懒加载组件多份索引（内存翻倍，曾触发 PM2 max-memory-restart）
+        with self._tool_instances_lock:
+            if tool_name not in self._tool_instances:
+                instance = self._create_tool(tool_name)
+                if instance is None:
+                    return None
+                self._tool_instances[tool_name] = QwenToolAdapter(instance, tool_name)
         return self._tool_instances[tool_name]
 
     def _create_tool(self, tool_name: str):
@@ -110,8 +119,10 @@ class TaskExecutor(IntentNodeMixin, ToolNodeMixin, ExtractNodeMixin, SummarizeNo
         graph = StateGraph(AgentState)
         graph.add_node("intent_node", self._intent_node)
         graph.add_node("tool_node", self._tool_node)
+        graph.add_node("observe_node", self._observe_node)
         graph.add_node("extract_node", self._extract_node)
         graph.add_node("summarize_node", self._summarize_node)
+        graph.add_node("critic_node", self._critic_node)
         graph.add_node("confirmation_node", self._confirmation_node)
 
         graph.set_entry_point("intent_node")
@@ -125,9 +136,19 @@ class TaskExecutor(IntentNodeMixin, ToolNodeMixin, ExtractNodeMixin, SummarizeNo
                 END: END,
             },
         )
-        graph.add_edge("tool_node", "extract_node")
+        graph.add_edge("tool_node", "observe_node")
+        graph.add_conditional_edges(
+            "observe_node",
+            self._route_after_observe,
+            {"observe_node": "observe_node", "extract_node": "extract_node"},
+        )
         graph.add_edge("extract_node", "summarize_node")
-        graph.add_edge("summarize_node", END)
+        graph.add_edge("summarize_node", "critic_node")
+        graph.add_conditional_edges(
+            "critic_node",
+            self._route_after_critic,
+            {"summarize_node": "summarize_node", END: END},
+        )
         graph.add_edge("confirmation_node", END)
 
         return graph.compile(checkpointer=self._memory)
@@ -210,6 +231,11 @@ class TaskExecutor(IntentNodeMixin, ToolNodeMixin, ExtractNodeMixin, SummarizeNo
             "charts": [],
             "report_url": None,
             "error": None,
+            "react_rounds": 0,
+            "react_last_added": False,
+            "_critic_feedback": None,
+            "_critic_issues": [],
+            "_critic_round": 0,
         }
         config = {"configurable": {"thread_id": thread_id}}
 
@@ -241,6 +267,7 @@ class TaskExecutor(IntentNodeMixin, ToolNodeMixin, ExtractNodeMixin, SummarizeNo
             "cesium_commands": final_state.get("cesium_commands", []),
             "charts": final_state.get("charts", []),
             "report_url": final_state.get("report_url"),
+            "kb_sources": final_state.get("kb_sources", []),
             "requires_confirmation": (
                 intent_result.requires_confirmation if intent_result else False
             ),

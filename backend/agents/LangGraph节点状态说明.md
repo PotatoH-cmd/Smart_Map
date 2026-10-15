@@ -1,5 +1,11 @@
 # `backend/agents` 中 LangGraph 节点与状态说明
 
+> ⚠️ **文档版本说明（2026-09 P1 改造后修订）**：本文档主体编写于 P1 架构改造之前。当前架构已发生两点关键演进：
+> 1. **图已从三节点（`intent → tool → response`）演进为七节点**：`intent → tool → observe(可自环) → extract → summarize ⇄ critic`，另有 `confirmation_node` 独立确认分支；
+> 2. **流式链路已由 `RunEngine` 统一驱动**：`execute_stream()` 已不存在，SSE 端点在 `routers/chat.py` 中统一走 RunEngine（内部手动顺序调用节点函数，不走 LangGraph 图）。
+>
+> 阅读时请注意：§4 / §5 / §6 / §8 / §9 / §16 / §17 / §18.4 / §18.8 / §18.10 / §18.11 中涉及“三节点图 / `response_node` / `execute_stream`”的表述属于旧版描述（文中已就地修订或标注）。**最新架构的完整说明见 §19**，以及设计文档《ReAct子图与Critic评审设计方案.md》。
+
 > 面向后续接手开发的实习生。本文重点解释：**这套 LangGraph 是怎么搭起来的、每个节点读写哪些状态、状态如何在节点之间流转、以及当前实现里有哪些容易误解的点。**
 
 ## 1. 先说结论
@@ -33,18 +39,26 @@
 
 ### 3.1 图的主流程
 
+> ⚠️ 已按七节点图更新（旧版为 `intent → tool → response` 三节点）。
+
 ```mermaid
 flowchart TD
     A[开始：execute\n构造 initial_state] --> B[intent_node\n调用 IntentAgent.analyze]
     B --> C{_route_after_intent}
 
     C -->|置信度 < 0.3| Z1[直接结束 END\n返回兜底回复]
-    C -->|需要用户确认| D[response_node\n生成确认/说明类文本]
-    C -->|无需工具| D
-    C -->|需要工具| E[tool_node\n并行执行 execution_plan 中的工具]
+    C -->|需要用户确认| D[confirmation_node\n透传确认文案]
+    C -->|无需工具| F[summarize_node\n直接生成文本]
+    C -->|需要工具| E[tool_node\n执行 execution_plan 中的工具]
 
-    E --> D
+    E --> O[observe_node\nReAct 观察（可自环补步）]
+    O --> X[extract_node\n抽结构化输出 + 摘要]
+    X --> F
+    F --> CR[critic_node\n质量评审（可打回重写）]
+    CR -.打回.-> F
     D --> Z2[结束 END\n输出 response / charts / map_commands 等]
+    Z1 --> Z2
+    CR --> Z2
 ```
 
 ### 3.2 状态流转视角
@@ -52,54 +66,76 @@ flowchart TD
 ```mermaid
 flowchart LR
     S0[user_message + chat_history] --> S1[intent_result]
-    S1 --> S2[tool_results]
+    S1 --> S2[tool_results（observe_node 可追加）]
     S2 --> S3[response + map_commands + cesium_commands + charts + report_url]
 ```
 
-你可以把整张图理解成一个很典型的三段式流水线：
+你可以把整张图理解成一个“带两个受控回环”的流水线：
 
 1. **先判断用户到底想干什么**
-2. **如果要调用工具，就把计划里的工具跑一遍**
-3. **最后把工具结果整合成人话，并抽取地图/图表/报告等结构化输出**
+2. **如果要调用工具，就把计划里的工具跑一遍；结果不够时 `observe_node` 再补一步（受控自环）**
+3. **抽取地图/图表/报告等结构化输出，整合成人话；高风险输出再经 `critic_node` 评审（受控回环，可打回重写一次）**
 
 ---
 
 ## 4. 图里有哪些节点
 
-在 `task_executor.py` 里，LangGraph 只注册了 3 个节点：
+> ⚠️ **本节已按 P1 改造后的现状修订**（旧版描述为 3 个节点：`intent_node` / `tool_node` / `response_node`）。
 
-1. `intent_node`
-2. `tool_node`
-3. `response_node`
+在 `task_executor.py` 的 `_build_graph()` 里，LangGraph 当前注册了 **7 个节点**：
+
+1. `intent_node`——意图识别 + 任务规划
+2. `tool_node`——按 `execution_plan` 并发执行工具步骤
+3. `observe_node`——图内 ReAct 观察（可自环，见 §19.2）
+4. `extract_node`——抽取结构化输出（地图/图表/报告）+ 生成工具摘要
+5. `summarize_node`——LLM 汇总生成自然语言回复
+6. `critic_node`——质量评审（可打回 `summarize_node` 重生成，见 §19.3）
+7. `confirmation_node`——确认路径专用节点（透传确认文案，不再经 LLM 覆写）
 
 入口节点是：`intent_node`
 
 边关系是：
 
-- `intent_node` --条件路由--> `tool_node` / `response_node` / `END`
-- `tool_node` --> `response_node`
-- `response_node` --> `END`
+- `intent_node` --条件路由--> `tool_node` / `summarize_node` / `confirmation_node` / `END`
+- `tool_node` --> `observe_node`
+- `observe_node` --条件路由--> `observe_node`（自环，本轮追加了步骤）/ `extract_node`（观察结束）
+- `extract_node` --> `summarize_node`
+- `summarize_node` --> `critic_node`
+- `critic_node` --条件路由--> `summarize_node`（评审打回，携反馈重生成）/ `END`（通过或放行）
+- `confirmation_node` --> `END`
 
-换句话说，这不是一个复杂的多分支多回环图，而是一个**单入口、单出口、中间按条件分流**的轻量图。
+换句话说，相比旧版“单入口、单出口、条件分流”的轻量图，现在多了**两个受控回环**：
+
+- `observe_node` 的自环（ReAct 观察循环，上限 `REACT_MAX_ROUNDS`）
+- `summarize_node ⇄ critic_node` 的评审回环（上限 `CRITIC_MAX_ROUNDS`）
 
 ---
 
 ## 5. 共享状态 `AgentState` 是什么
 
-`task_executor.py` 里通过 `TypedDict` 定义了 LangGraph 的共享状态：
+> ⚠️ **说明已更新**：状态定义已从 `task_executor.py` 机械搬移到 `agents/state.py`（`TypedDict`，类名仍为 `AgentState`）。P1 改造后新增了 5 个字段（见下表中带 ★ 的行）。
+
+`agents/state.py` 里通过 `TypedDict` 定义了 LangGraph 的共享状态：
 
 | 状态字段 | 类型 | 作用 | 主要由谁写入 |
 | --- | --- | --- | --- |
 | `user_message` | `str` | 当前用户输入 | `execute()` 初始化 |
 | `chat_history` | `List[Dict]` | 历史对话，用于辅助意图识别 | `execute()` 初始化 |
 | `intent_result` | `Optional[IntentResult]` | 结构化意图分析结果 | `intent_node` |
-| `tool_results` | `List[Dict]` | 所有工具执行结果 | `tool_node` |
-| `response` | `str` | 最终返回给前端的文本回答 | `response_node` 或路由阶段兜底 |
-| `map_commands` | `List[Dict]` | 2D 地图命令 | `response_node` |
-| `cesium_commands` | `List[Dict]` | 3D 地图命令 | `response_node` |
-| `charts` | `List[Dict]` | 图表配置 | `response_node` |
-| `report_url` | `Optional[str]` | 报告下载地址 | `response_node` |
+| `tool_results` | `List[Dict]` | 所有工具执行结果 | `tool_node` / `observe_node` |
+| `tool_summaries` | `List[str]` | 工具结果摘要（extract → summarize 传递） | `extract_node` |
+| `response` | `str` | 最终返回给前端的文本回答 | `summarize_node` 或路由阶段兜底 |
+| `map_commands` | `List[Dict]` | 2D 地图命令 | `extract_node` |
+| `cesium_commands` | `List[Dict]` | 3D 地图命令 | `extract_node` |
+| `charts` | `List[Dict]` | 图表配置 | `extract_node` |
+| `report_url` | `Optional[str]` | 报告下载地址 | `extract_node` |
+| `kb_sources` | `List[Dict]` | 知识库溯源引用（结构化） | `extract_node` |
 | `error` | `Optional[str]` | 预留错误字段，目前使用不多 | `execute()` 初始化 |
+| ★ `react_rounds` | `int` | 图内 ReAct：已用观察轮数（覆盖语义） | `observe_node` |
+| ★ `react_last_added` | `bool` | 图内 ReAct：最近一轮是否追加步骤（观察路由依据） | `observe_node` |
+| ★ `_critic_feedback` | `Optional[str]` | 评审反馈：待消费的修正指令（summarize 生成后清空） | `critic_node` 写入 / `summarize_node` 消费清空 |
+| ★ `_critic_issues` | `List[str]` | 评审问题清单（日志/埋点用） | `critic_node` |
+| ★ `_critic_round` | `int` | 评审已用修正轮数（只增不减，防死循环） | `critic_node` |
 
 其中这几个字段用了：
 
@@ -113,6 +149,8 @@ flowchart LR
 - `charts`
 
 这表示 **LangGraph 在并行分支合并状态时，可以用 `operator.add` 追加列表**。不过要注意：**当前这份图并没有真正把 `tool_node` 拆成多个 LangGraph 并行节点**，而是在 `tool_node` 内部使用 `asyncio.gather()` 做并发。所以这里更像是“为后续扩展预留的状态合并能力”。
+
+> ⚠️ **reducer 安全约定（新增）**：`tool_results` 是 `operator.add` 合并语义，所以 `observe_node` 返回时**只携带本轮新增的那一条结果**（部分更新），严禁返回全量列表（会翻倍）。新增节点返回部分更新或 `{}` 均可，LangGraph 按 reducer 合并。
 
 ---
 
@@ -177,12 +215,12 @@ flowchart LR
 
 - 先写入确认提示文本到 `response`
 - 清空 `map_commands / cesium_commands / charts / tool_results`
-- 跳到 `response_node`
+- 跳到 `confirmation_node`（透传确认文案，不再被覆写）
 
 #### 情况 D：不需要工具
 
 - `tool_results = []`
-- 跳到 `response_node`
+- 跳到 `summarize_node`（跳过 tool/extract，直接生成文本）
 
 #### 情况 E：需要工具
 
@@ -237,15 +275,19 @@ flowchart LR
 
 ---
 
-### 6.4 `response_node`
+### 6.4 `extract_node` + `summarize_node`（原 `response_node` 已拆分）
 
-**职责**：把 `tool_results` 汇总成最终输出。
+> ⚠️ **本节已按现状修订**：旧版的 `response_node` 被拆成了两个节点——`extract_node`（抽结构化结果）+ `summarize_node`（LLM 文本汇总），职责分离后再加上 `critic_node` 评审，链路为 `extract → summarize → critic`。
+
+#### `extract_node`（文件：`agents/nodes/extract_node.py`）
+
+**职责**：从 `tool_results` 中抽取结构化输出，并生成工具摘要。
 
 **输入状态**：
 
-- `user_message`
 - `intent_result`
 - `tool_results`
+- `user_message`
 
 **输出状态**：
 
@@ -253,26 +295,29 @@ flowchart LR
 - `cesium_commands`
 - `charts`
 - `report_url`
-- `response`
+- `kb_sources`
+- `tool_summaries`（供 summarize 使用）
 
-它干了两类事情：
-
-#### 第一类：提取结构化结果
-
-从 `tool_results` 中抽取：
+抽取规则（与旧版一致）：
 
 - `map_command` -> 收集到 `map_commands`
 - `cesium_command` -> 收集到 `cesium_commands`
 - `data_visualizer_tool` 的图表配置 -> 收集到 `charts`
 - `report_generator_tool` 的下载地址 -> 写入 `report_url`
 
-#### 第二类：生成面向用户的文本回复
+#### `summarize_node`（文件：`agents/nodes/summarize_node.py`）
 
-把每个工具的 `content / message / error` 抽成摘要后，再调用一次 LLM 做自然语言总结，写入 `response`。
+**职责**：把每个工具的 `content / message / error` 摘要后，调用一次 LLM 做自然语言总结，写入 `response`。
 
-所以 `response_node` 的本质不是单纯“回复一句话”，而是：
+**P1 改造要点（评审反馈注入）**：
 
-> **把工具层产生的结构化结果和文字摘要打包成最终输出对象。**
+1. **短路**：若 `response` 已有值且 `_critic_feedback` 为空，直接返回（避免重复生成）；
+2. **反馈注入**：若 `_critic_feedback` 有值，`rich_content` 透传禁用，并在 prompt 中追加“上一版回答存在以下问题：{feedback}”，要求重输出完整回答；
+3. **反馈消费**：生成完成后**必须清空 `_critic_feedback`**（否则 `critic_node` 路由会再次打回，导致死循环）。
+
+所以 `extract + summarize + critic` 的本质是：
+
+> **把工具层产生的结构化结果和文字摘要打包成最终输出对象，再经质量评审确认或打回重写。**
 
 ---
 
@@ -329,10 +374,11 @@ flowchart LR
    - 调用 `postgresql_tool`
    - 调用 `data_visualizer_tool`
    - 得到 `tool_results`
-5. `response_node`：
+5. `extract_node`：
    - 从结果中抽出 `charts`
-   - 生成文字说明 `response`
-6. `END`：
+6. `summarize_node`：
+   - 生成文字说明 `response`（之后经 `critic_node` 评审放行）
+7. `END`：
    - 前端拿到 `response + charts`
 
 ---
@@ -362,28 +408,20 @@ flowchart LR
 
 当 `IntentAgent` 判断任务需要确认时：
 
-1. `_route_after_intent` 先生成确认文案
+1. `_route_after_intent` 先生成确认文案（写入 `response`）
 2. 清空所有结构化输出
-3. 跳转到 `response_node`
+3. 跳转到 **`confirmation_node`**
+4. `confirmation_node` 透传确认文案，直接 `END`
 
 从设计意图看，这条路径是：
 
 > **先告诉用户“我理解你要做什么，我准备怎么做，请确认一下”。**
 
-不过这里要特别提醒：
+### 历史细节（已修复）
 
-### 当前实现有一个值得注意的细节
+旧实现中，确认路径跳到 `response_node`，导致 `_route_after_intent()` 写入的确认文案被 `response_node` 重新生成的 `response` 覆盖。
 
-在 `_route_after_intent()` 里，代码先把确认文案写进了 `state["response"]`，然后返回 `"response_node"`。
-
-但 `response_node()` 里又会重新生成一次 `response`，并把原来的值覆盖掉。
-
-也就是说：
-
-- **从“代码意图”看**：这条路径应该返回确认信息
-- **从“当前实现”看**：确认信息存在被后续 `response_node` 覆盖的风险
-
-这属于一个非常值得后续维护者注意的点。
+**P1 前已修复**：新增独立节点 `confirmation_node`（定义在 `agents/nodes/serialize.py` 的 `OutputSerializationMixin` 中），只透传 `_route_after_intent` 写入的确认文案，不走 `summarize_node`，直接 `confirmation_node → END`。
 
 ---
 
@@ -392,13 +430,9 @@ flowchart LR
 如果 `execution_plan` 里没有任何工具：
 
 1. `_route_after_intent` 设定 `tool_results = []`
-2. 跳到 `response_node`
-3. `response_node` 发现没有工具摘要
-4. 返回：
-
-```text
-已完成操作：{intent_result.task_context}
-```
+2. 跳到 **`summarize_node`**
+3. `summarize_node` 发现没有工具摘要
+4. 生成轻量文本回复
 
 这条路径适合一些非常轻量的意图解释或无需查库/上图的请求。
 
@@ -406,13 +440,19 @@ flowchart LR
 
 ## 9. 一个更适合实习生记忆的“节点状态表”
 
+> ⚠️ **已按七节点图重制**。
+
 | 节点 / 阶段 | 进入时重点状态 | 离开时新增/修改状态 | 你可以怎么理解 |
 | --- | --- | --- | --- |
 | `execute()` | 用户输入、历史消息 | 初始化整份 `AgentState` | 开局装配上下文 |
 | `intent_node` | `user_message`, `chat_history` | `intent_result` | 把自然语言翻译成任务单 |
 | `_route_after_intent` | `intent_result` | 决定下一个节点，并可能提前写 `response` | 图的交通指挥员 |
 | `tool_node` | `intent_result.execution_plan` | `tool_results` | 按计划真正干活 |
-| `response_node` | `tool_results` | `response`, `charts`, `map_commands` 等 | 把执行结果包装成最终输出 |
+| `observe_node` | `tool_results`, `react_rounds` | `tool_results`（追加单条）、`react_rounds`, `react_last_added` | 看一眼结果，还缺就补一步 |
+| `extract_node` | `tool_results` | `map_commands`, `charts`, `report_url`, `kb_sources`, `tool_summaries` 等 | 抽取结构化输出 + 生成摘要 |
+| `summarize_node` | `tool_summaries`, `_critic_feedback` | `response`（并消费清空 `_critic_feedback`） | 把工具结果写成自然语言回复 |
+| `critic_node` | `response`, `intent_result`, `tool_results`, `_critic_round` | 打回时：清空 `response`、写 `_critic_feedback` / `_critic_issues`、`_critic_round`+1 | 质量评审：通过放行 / 打回重写 |
+| `confirmation_node` | `response`（确认文案） | 不变（透传） | 确认路径专用，不再被覆写 |
 | `END` | 完整最终状态 | 返回给调用方 | 本轮图执行结束 |
 
 ---
@@ -481,9 +521,9 @@ flowchart LR
 
 ---
 
-### 12.3 `requires_confirmation` 路径有回复被覆盖风险
+### 12.3 `requires_confirmation` 路径曾有回复被覆盖风险（已修复）
 
-这是当前实现里最值得注意的维护点之一，上面已经解释过。
+旧实现中确认文案会被 `response_node` 覆盖；现已由独立节点 `confirmation_node` 修复（见 §8.3）。
 
 ---
 
@@ -513,60 +553,50 @@ flowchart LR
 
 ---
 
-### 12.6 `response_node` 既负责“抽结构化结果”，又负责“写自然语言回复”
+### 12.6 `response_node` 曾“抽结构化结果 + 写自然语言回复”职责二合一（已拆分）
 
-这让它看起来很方便，但同时意味着：
+旧版的 `response_node` 职责较重。现已拆分为：
 
-- 节点职责略重
-- 一旦后续加更多输出类型，这个节点很容易继续膨胀
+- `extract_node`：只负责抽结构化结果（`map_commands` / `charts` / `report_url` / `kb_sources`）+ 生成 `tool_summaries`
+- `summarize_node`：只负责 LLM 文本汇总（写 `response`，并消费 `_critic_feedback`）
 
-后面如果系统变复杂，比较自然的演进方向是再拆出：
-
-- `extract_output_node`
-- `summarize_response_node`
+后面如果继续加输出类型，只需扩展 `extract_node`，不会再触碰文本生成逻辑。
 
 ---
 
-## 13. 给后续开发的建议
+## 13. 给后续开发的建议（旧建议的落地情况）
 
-如果后面要继续扩展这套图，建议优先考虑以下方向：
+> ⚠️ **本节已更新**：以下建议中的 13.1 / 13.3 已在 P1 改造中落地。
 
-### 13.1 把确认分支从 `response_node` 中剥离
+### 13.1 把确认分支从 `response_node` 中剥离 ✅ 已实施
 
-最稳妥的做法是新增一个专门节点，例如：
+已新增 `confirmation_node`，确认文案不再被覆写（见 §8.3）。
 
-- `confirmation_node`
+### 13.2 真正把工具调用升级成图级并行分支（未实施）
 
-这样可以避免确认文案被后续统一回复逻辑覆盖。
-
-### 13.2 真正把工具调用升级成图级并行分支
-
-当前只是 `tool_node` 内部并发。后面如果需要更清晰的可观测性，可以拆成：
+当前仍是 `tool_node` 内部并发。后面如果需要更清晰的可观测性，可以拆成：
 
 - `db_query_node`
 - `visualize_node`
 - `report_node`
 
-然后通过 LangGraph 的合并能力汇总状态。
+然后通过 LangGraph 的合并能力汇总状态。（注：目前 `tool_results` 的 `operator.add` 合并能力已被 `observe_node` 自环追加单条结果使用。）
 
-### 13.3 给 `AgentState` 增加更明确的中间字段
+### 13.3 给 `AgentState` 增加更明确的中间字段 ✅ 部分实施
 
-例如：
+已增加：
 
-- `tool_summaries`
-- `selected_tools`
-- `confirmation_message`
-- `final_payload`
+- `tool_summaries`（extract → summarize 传递）
+- `react_rounds` / `react_last_added`（图内 ReAct 轮数与路由依据）
+- `_critic_feedback` / `_critic_issues` / `_critic_round`（评审反馈闭环）
 
-这样维护时会更容易观察每一阶段到底产出了什么。
+尚未实施：`selected_tools` / `confirmation_message` / `final_payload`。
 
 ---
 
 ## 14. 一句话总结
 
-如果只记一句话，请记这个：
-
-> **这套 LangGraph 的核心流程就是：`intent_node` 先把用户需求转成 `IntentResult`，`tool_node` 按 `execution_plan` 干活，`response_node` 再把工具结果整理成最终输出。**
+> **这套 LangGraph 的核心流程是：`intent_node` 先把用户需求转成 `IntentResult`，`tool_node` 按 `execution_plan` 干活，`observe_node` 按需补步（ReAct），`extract_node` 抽出结构化输出，`summarize_node` 写成自然语言回复，`critic_node` 做质量评审（可打回重写一次）。**
 
 而 `intent_agent.py` 并不是图本身，它是 `intent_node` 背后的“分析引擎”。
 
@@ -595,22 +625,26 @@ flowchart LR
 
 ```mermaid
 flowchart LR
-    A[1. 前端发起 /chat 请求] --> B[2. `main.py` 的 `chat()` 接口]
+    A[1. 前端发起 /chat 请求] --> B[2. `routers/chat.py` 的 `chat()` 接口]
     B --> C{3. 是否启用 `USE_INTENT_AGENT`?}
     C -->|否| X[走旧版 bot 链路]
     C -->|是| D[4. `TaskExecutor.execute()`]
 
-    subgraph G1[LangGraph 主流程]
+    subgraph G1[LangGraph 主流程（七节点）]
         D --> E[5. `intent_node`\n识别意图 + 生成任务计划]
         E --> F{6. 路由判断}
         F -->|低置信度| G[直接结束\n返回兜底回复]
-        F -->|需要确认| H[进入 `response_node`\n生成说明文本]
-        F -->|无需工具| H
+        F -->|需要确认| H[进入 `confirmation_node`\n透传确认文案]
+        F -->|无需工具| S[进入 `summarize_node`\n直接生成文本]
         F -->|需要工具| I[进入 `tool_node`\n并发调用工具]
-        I --> J[进入 `response_node`\n汇总工具结果]
+        I --> O[进入 `observe_node`\nReAct 观察（可自环补步）]
+        O --> X1[进入 `extract_node`\n抽结构化输出 + 摘要]
+        X1 --> S
+        S --> CRT[进入 `critic_node`\n质量评审（可打回重写）]
+        CRT -.打回.-> S
         H --> K[END]
         G --> K
-        J --> K
+        CRT --> K
     end
 ```
 
@@ -644,11 +678,15 @@ flowchart TB
         H[`chat_history`]
         I[`intent_result`]
         T[`tool_results`]
+        TS[`tool_summaries`]
         R[`response`]
         M[`map_commands`]
         C[`cesium_commands`]
         CH[`charts`]
         P[`report_url`]
+        KS[`kb_sources`]
+        RR[`react_rounds` / `react_last_added`]
+        CF[`_critic_feedback` / `_critic_issues` / `_critic_round`]
     end
 
     N1[`intent_node`] -->|读取| U
@@ -658,14 +696,25 @@ flowchart TB
     N2[`tool_node`] -->|读取| I
     N2 -->|写入| T
 
-    N3[`response_node`] -->|读取| U
-    N3 -->|读取| I
-    N3 -->|读取| T
-    N3 -->|写入| R
+    N4[`observe_node`] -->|读取| T
+    N4 -->|写入单条| T
+    N4 -->|写入| RR
+
+    N3[`extract_node`] -->|读取| T
     N3 -->|写入| M
     N3 -->|写入| C
     N3 -->|写入| CH
     N3 -->|写入| P
+    N3 -->|写入| KS
+    N3 -->|写入| TS
+
+    N5[`summarize_node`] -->|读取| TS
+    N5 -->|读取/清空| CF
+    N5 -->|写入| R
+
+    N6[`critic_node`] -->|读取| R
+    N6 -->|打回时写入| CF
+    N6 -->|打回时清空| R
 ```
 
 ### 16.4 节点职责图：每个节点只做什么事
@@ -676,17 +725,21 @@ flowchart TB
 flowchart LR
     A[`intent_node`] --> A1[把用户自然语言\n变成结构化 `IntentResult`]
     B[`tool_node`] --> B1[按照 `execution_plan`\n并发调用工具]
-    C[`response_node`] --> C1[把工具结果整理成\n文字回复、图表、地图命令、报告地址]
+    O[`observe_node`] --> O1[ReAct 观察：\n看结果，不够就补一步]
+    C[`extract_node`] --> C1[抽出图表、地图命令、\n报告地址、知识库引用]
+    S[`summarize_node`] --> S1[调 LLM 把工具结果\n写成自然语言回复]
+    D[`critic_node`] --> D1[质量评审：\n通过放行 / 打回重写]
+    E[`confirmation_node`] --> E1[透传确认文案\n不走 LLM]
 ```
 
-### 16.5 当前实现里最值得注意的风险图
+### 16.5 历史风险图（已修复）
 
-这一张图只讲一个问题：**确认分支本来想先返回确认文案，但后面可能被 `response_node` 改写。**
+这一张图记录旧版的一个设计风险：**确认分支的文案可能被 `response_node` 改写**。现已由 `confirmation_node` 修复。
 
 ```mermaid
 flowchart LR
-    A[`_route_after_intent()`\n先写入确认文案] --> B[`response_node`\n再次生成 `response`]
-    B --> C[最终返回给前端的文本\n可能不是原来的确认文案]
+    A[`_route_after_intent()`\n写入确认文案] --> B[`confirmation_node`\n透传，不改写]
+    B --> C[最终返回给前端\n就是原始确认文案]
 ```
 
 ### 16.6 最推荐的阅读顺序
@@ -696,61 +749,65 @@ flowchart LR
 1. **先看 `16.1`**：知道整条链路从哪里进、到哪里出
 2. **再看 `16.2`**：知道系统最终只有 4 种路径
 3. **再看 `16.3`**：知道每个节点往共享状态里写什么
-4. **最后看 `16.5`**：知道当前实现里最值得留心的一个点
+4. **最后看 §19**：了解两个受控回环（observe 自环 / critic 评审回环）的完整机制
 
-如果看完这 4 张图还是觉得抽象，再回到前面的详细文字说明，就会顺很多。
+如果看完这几张图还是觉得抽象，再回到前面的详细文字说明，就会顺很多。
 
 ---
 
-## 17. `execute_stream()` 与 LangGraph 图的关系——最容易误解的一个设计
+## 17. 流式链路与 LangGraph 图的关系——最容易误解的一个设计
+
+> ⚠️ **本节已整体重写**：旧版描述的是 `TaskExecutor.execute_stream()` 手写生成器，该实现已被 P1 收敛移除；流式链路现由 **`agents/run_engine.py` 的 `RunEngine`** 统一驱动（`routers/chat.py` 收敛为单驱动，RunEngine 不可用时才回退 legacy bot）。
 
 ### 17.1 问题：流式接口到底走不走 LangGraph 图？
 
-`TaskExecutor` 里有两个对外接口：
+后端有两个对外入口：
 
-| 方法 | 调用者 | 走不走 `self._graph`？ |
+| 入口 | 调用者 | 走不走 `self._graph`？ |
 |------|--------|----------------------|
-| `execute(message, session_id)` | `main.py` 的非流式 `/chat` 端点（如果存在） | ✅ 走，调用 `self._graph.ainvoke()` |
-| `execute_stream(message, session_id)` | `main.py` 的 SSE `/chat/stream` 端点 | ❌ 不走，手写生成器手动调节点 |
+| `/chat`（非流式） | `routers/chat.py` → `TaskExecutor.execute()` | ✅ 走，调用 `self._graph.ainvoke()` |
+| `/chat/stream`（SSE） | `routers/chat.py` → `RunEngine.start()` | ❌ 不走图，RunEngine 手动顺序调用节点函数 |
 
-**结论：前端看到的所有流式状态卡片，走的完全是 `execute_stream()` 这个手写生成器，与 LangGraph 图的调度逻辑无关。**
+**结论：前端看到的所有流式状态卡片由 `RunEngine` 驱动（事件经 EventBus 落 RunStore，再由 SSE 端点转发），与 LangGraph 图的调度逻辑无关；但两者共享同一套节点函数（`_intent_node` / `_tool_node` / `_observe_node` / `_extract_node` / `_summarize_node` / `_critic_node`）与协同组件（ReActObserver / ResponseCritic），只是调度方式不同。**
 
 ---
 
-### 17.2 为什么要绕开 LangGraph 图？
+### 17.2 为什么流式链路不直接用 LangGraph 的 `.astream()`？
 
 LangGraph 原生的 `.astream()` / `.ainvoke()` 只能在**节点完成后**才能拿到该节点的输出，粒度是"节点级"的。
 
-但我们需要的进度粒度更细：
-- 意图识别**开始时**就想推一张卡片
-- 每个工具**开始执行**时推一张卡片，**完成时**再更新
-- LLM 汇总**开始生成**时推一张卡片
+但流式链路需要的控制力更强：
+- 进度粒度更细：意图识别**开始时**推卡片、每个工具**开始/完成**各推一次、评审**开始/打回/完成**各推一次；
+- run 可中断 / 可恢复（确认、补参）/ 可取消，且**断线不影响后台执行**（run 在独立 asyncio task 中运行，事件落 RunStore，重连按 `seq` 补拉）。
 
-LangGraph 的节点是黑盒，无法在节点内部埋 `yield`。所以 `execute_stream()` 选择**完全绕开 `self._graph`**，改为手动顺序调用各节点函数，并在每个关键时间点插入 `yield`。
+LangGraph 的节点是黑盒，无法在节点内部埋细粒度事件。所以 `RunEngine` 选择**不经过 `self._graph`**，改为手动顺序调用节点函数，并在每个关键时间点 `_emit()` 事件。
 
 ---
 
-### 17.3 `execute_stream()` 的执行顺序
+### 17.3 RunEngine 的执行顺序（主路径概览）
 
 ```
-execute_stream()
+RunEngine.start(run_id, ...)
 │
-├─ yield {type: "queued"}          # 收到请求，排队中
-├─ yield {type: "start"}           # 开始处理
+├─ emit status(intent)              # 意图分析开始
+├─ 调用 _intent_node(state)         # 意图分析完成，附带 intent_result
 │
-├─ 调用 _intent_node(state)
-│   ├─ yield {type: "intent_start"}         # 意图分析开始
-│   └─ yield {type: "intent_complete"}      # 意图分析完成，附带 intent_result
+├─ 直答分支（部分无需工具的简单场景）→ 生成回复 → emit final
 │
-├─ 调用 _tool_node(state)          （如果有需要工具的步骤）
-│   ├─ yield {type: "tool_start", tool_label: ...}   # 每个工具开始
-│   └─ yield {type: "tool_result", tool_label: ...}  # 每个工具完成（asyncio.as_completed 顺序）
+├─ 主路径（完整链路）：
+│   ├─ 逐步骤/并行执行工具（asyncio.as_completed 顺序）
+│   │   ├─ emit tool_start          # 每个工具开始
+│   │   └─ emit tool_result         # 每个工具完成
+│   ├─ ReAct 观察（_react_observe → 共享 ReActObserver）
+│   ├─ 调用 _extract_node(state)
+│   ├─ 调用 _summarize_node(state)
+│   ├─ _critic_review_stream(run_id, state, intent_result)   # P1：质量评审
+│   │   ├─ emit status(critic)          # 评审开始
+│   │   ├─ 打回 → emit status(critic_revise) → 携反馈重生成 → emit status(critic_done)
+│   │   └─ 通过/降级 → emit status(critic_done)
+│   └─ workspace.record 等收尾
 │
-├─ 调用 _response_node(state)
-│   ├─ yield {type: "response_start"}       # LLM 汇总开始
-│   └─ yield {type: "response_complete"}    # 汇总完成
-│
-└─ yield {type: "final", result: {...}}     # 最终结果，包含 response/charts/map_commands 等
+└─ emit final(result)               # 最终结果，包含 response/charts/map_commands 等
 ```
 
 ---
@@ -758,22 +815,25 @@ execute_stream()
 ### 17.4 `self._graph` 什么时候被用到？
 
 `self._graph` 在 `__init__` 里编译好，绑定了 `MemorySaver` 做会话记忆。  
-如果将来有非流式调用场景（如批处理、测试），可以直接用 `self._graph.ainvoke()`，享受 LangGraph 的自动状态管理和路由。
+非流式 `/chat` 端点调用 `TaskExecutor.execute()` 时，走 `self._graph.ainvoke()`，七节点图（含 observe 自环与 critic 回环）完整生效。
 
-目前的前端 SSE 链路完全走 `execute_stream()`，`self._graph` 在生产环境中暂时处于**备用/测试状态**。
+流式 `/chat/stream` 端点则完全走 `RunEngine`，`self._graph` 不参与。
 
 ---
 
 ### 17.5 SSE 事件如何从后端到前端状态卡片
 
 ```
-task_executor.py                   main.py                        前端 App.jsx
-execute_stream()                   /chat/stream                   SSE EventSource
+run_engine.py                      routers/chat.py                 前端
+RunEngine._emit()                  /chat/stream                    SSE EventSource
     │                                  │                               │
-    ├─ yield {type:"intent_start"}  ──►│ data: {...}\n\n  ──────────►│ pushStreamProgress()
-    ├─ yield {type:"tool_start"}    ──►│ data: {...}\n\n  ──────────►│ pushStreamProgress()
-    ├─ yield {type:"tool_result"}   ──►│ data: {...}\n\n  ──────────►│ pushStreamProgress()
-    └─ yield {type:"final"}         ──►│ data: {...}\n\n  ──────────►│ finalResult = event.result
+    ├─ EventBus.publish()  ──► RunStore（seq 严格递增）                 │
+    │                                  │                               │
+    │                     event_generator():                          │
+    │                     queue = await bus.subscribe(run_id)         │
+    │                     queue.get() → SSE data 帧  ──────────────►│ pushStreamProgress()
+    │                                  │                               │
+    └─ final 事件          ──► SSE data 帧            ──────────────►│ finalResult = event.result
                                        │                               │ setMessages(...) 渲染最终回复
 ```
 
@@ -786,7 +846,7 @@ execute_stream()                   /chat/stream                   SSE EventSourc
 
 ### 17.6 一句话总结
 
-> **`self._graph` 定义了"图长什么样"，`execute_stream()` 定义了"流式接口怎么跑"。两者共享同一套节点函数（`_intent_node` / `_tool_node` / `_response_node`），但调度方式完全不同。**
+> **`self._graph` 定义了"图长什么样"（非流式链路直接执行七节点图），`RunEngine` 定义了"流式接口怎么跑"（手动顺序调用节点 + 细粒度事件）。两者共享同一套节点函数与协同组件（ReActObserver / ResponseCritic），但调度方式完全不同。**
 
 ---
 
@@ -874,28 +934,44 @@ map_commands: Annotated[List[Dict], operator.add]
 graph.set_entry_point("intent_node")
 graph.add_conditional_edges(
     "intent_node",
-    self._route_after_intent,        # 路由函数：返回 "tool_node" / "response_node" / END
+    self._route_after_intent,   # 路由函数：返回 "tool_node" / "summarize_node" / "confirmation_node" / END
     {
         "tool_node": "tool_node",
-        "response_node": "response_node",
+        "summarize_node": "summarize_node",
+        "confirmation_node": "confirmation_node",
         END: END,
     },
 )
-graph.add_edge("tool_node", "response_node")   # 工具执行完，固定进入汇总节点
-graph.add_edge("response_node", END)
+graph.add_edge("tool_node", "observe_node")      # 工具执行完，进入 ReAct 观察
+graph.add_edge("extract_node", "summarize_node")
+graph.add_edge("summarize_node", "critic_node")  # 生成后进入质量评审
+graph.add_conditional_edges(                      # 条件回环：评审打回 → 重生成
+    "critic_node",
+    self._route_after_critic,
+    {"summarize_node": "summarize_node", END: END},
+)
 ```
 
-`_route_after_intent` 就是那个"看 LLM 输出，决定往哪走"的函数：
+`_route_after_intent` 就是那个“看 LLM 输出，决定往哪走”的函数：
 
 ```python
 def _route_after_intent(self, state):
     if intent_result.confidence < 0.3:
-        return END          # 置信度太低，直接结束
+        return END                    # 置信度太低，直接结束
     if intent_result.requires_confirmation:
-        return "response_node"   # 需要确认，跳过工具
+        return "confirmation_node"    # 需要确认，跳过工具
     if not required_tools:
-        return "response_node"   # 无工具，直接回答
-    return "tool_node"           # 正常路径，先调工具
+        return "summarize_node"       # 无工具，直接回答
+    return "tool_node"                # 正常路径，先调工具
+```
+
+而 `_route_after_critic` 是评审回环的“闸门”：
+
+```python
+def _route_after_critic(self, state):
+    if state.get("_critic_feedback"):   # 打回：携反馈回到 summarize 重生成
+        return "summarize_node"
+    return END                          # 通过或放行，结束
 ```
 
 ---
@@ -978,14 +1054,14 @@ class IntentResult(BaseModel):
 | `asyncio.as_completed(tasks)` | 并发启动，按**完成顺序**返回结果（谁先完成谁先 yield） |
 
 **本项目用法**：
-- `_tool_node`（非流式）：用 `asyncio.gather`，一次性拿到所有工具结果
-- `execute_stream`（流式）：用 `asyncio.as_completed`，每个工具完成后立刻 `yield tool_result` 事件给前端
+- `_tool_node`（非流式图）：用 `asyncio.gather`，一次性拿到所有工具结果
+- `RunEngine`（流式执行引擎）：用 `asyncio.as_completed`，每个工具完成后立刻 `_emit("tool_result", ...)` 事件（事件先落 RunStore，再由 SSE 端点订阅推送）
 
 ```python
-# 流式版：工具完成一个，立刻推一个进度卡片
-for finished_task in asyncio.as_completed(tasks):
-    step_id, result = await finished_task
-    yield {"type": "tool_result", ...}   # 立刻推给前端
+# 流式版：工具完成一个，立刻推一个进度卡片（run_engine.py 简化示意）
+for finished in asyncio.as_completed(list(pending_tasks.values())):
+    step_id, result = await finished
+    await self._emit(run_id, "tool_result", ...)   # 立刻推送
 ```
 
 **为什么这么做**：用户发出请求后，如果有 3 个工具要并发执行，不用等全部完成才看到进度，而是每完成一个就能看到一张进度卡片，体验更好。
@@ -1010,27 +1086,20 @@ result = await loop.run_in_executor(None, adapter.invoke, params)
 
 **是什么**：Python 的 `async def` 函数里使用 `yield` 就成了异步生成器，调用者用 `async for` 遍历，每次 `yield` 推送一个值。
 
-**本项目用法**：`execute_stream()` 的完整签名：
+**本项目用法**：当前 SSE 主链路已不再用“手写生成器直连节点”的方式（旧版 `execute_stream()` 已移除），而是：
+
+1. `RunEngine.start()` 在独立 asyncio task 中执行 run，通过 `EventBus` 把每个阶段事件写入 `RunStore`（带严格递增 `seq`）；
+2. `routers/chat.py` 的 SSE 端点在 `event_generator()` 里订阅 `EventBus`，把事件逐条序列化为 SSE `data:` 帧推给前端（断线后可按 `seq` 补拉）。
 
 ```python
-async def execute_stream(
-    self, user_message, chat_history, thread_id
-) -> AsyncGenerator[Dict[str, Any], None]:
-    ...
-    yield {"type": "intent_start", ...}
-    state = self._intent_node(state)
-    yield {"type": "intent_complete", ...}
-    ...
-    yield {"type": "final", "result": {...}}
+# routers/chat.py（简化示意）
+queue = await bus.subscribe(run_id)      # 订阅事件
+while True:
+    event = await queue.get()
+    yield f"data: {json.dumps(event)}\n\n"   # SSE 格式
 ```
 
-`main.py` 的 SSE 端点用 `async for` 遍历它，逐个推给前端：
-
-```python
-async def event_generator():
-    async for event in task_executor.execute_stream(message):
-        yield f"data: {json.dumps(event)}\n\n"   # SSE 格式
-```
+因此 `AsyncGenerator` 依然是流式输出的核心形态（SSE 端点本身就是一个异步生成器），只是事件源从“手写编排的 `execute_stream()`”换成了“**RunEngine + EventBus**”。
 
 ---
 
@@ -1038,17 +1107,111 @@ async def event_generator():
 
 | 技术 | 来源 | 本项目用途 |
 |------|------|-----------|
-| `StateGraph` | LangGraph | 定义三节点图的结构和路由 |
+| `StateGraph` | LangGraph | 定义七节点图（含 observe 自环与 critic 评审回环）的结构和路由 |
 | `TypedDict` + `Annotated` | Python / LangGraph | 共享状态定义 + 列表自动合并 |
-| `add_conditional_edges` | LangGraph | `intent_node` 完成后动态决定走哪个节点 |
+| `add_conditional_edges` | LangGraph | `intent_node` 分流、`observe_node` 自环、`critic_node` 回环三处动态路由 |
 | `MemorySaver` | LangGraph | 进程内多轮对话记忆 |
 | `graph.compile()` | LangGraph | 编译图，绑定检查点 |
 | `with_structured_output` | LangChain | 意图识别直接输出 `IntentResult` Pydantic 对象 |
 | `ChatOpenAI` | LangChain | 统一调用 Qwen 模型（兼容 OpenAI API） |
 | `SystemMessage` / `HumanMessage` | LangChain | 构造 LLM 输入消息 |
-| `asyncio.gather` | Python 标准库 | 非流式并发调用工具 |
-| `asyncio.as_completed` | Python 标准库 | 流式按完成顺序推进度事件 |
-| `run_in_executor` | Python 标准库 | 同步工具异步化，不阻塞事件循环 |
-| `AsyncGenerator` / `yield` | Python 标准库 | `execute_stream()` 流式输出核心 |
+| `asyncio.gather` | Python 标准库 | 非流式图内并发调用工具 |
+| `asyncio.as_completed` | Python 标准库 | RunEngine 按完成顺序推进度事件 |
+| `run_in_executor` | Python 标准库 | 同步工具/评审调用的异步化，不阻塞事件循环 |
+| `AsyncGenerator` / `yield` | Python 标准库 | SSE 端点订阅 EventBus 的输出形态 |
 | `Pydantic BaseModel` | Pydantic | `IntentResult` / `TaskStep` 数据校验 |
 | `str Enum` | Python 标准库 | `IntentType` 枚举，值即字符串，JSON 序列化友好 |
+
+---
+
+## 19. P1 架构演进（2026-09）——两个受控回环
+
+> 本节是全文的“最新真相”汇总。P1 改造把两个原本只存在于流式路径的智能能力（ReAct 观察、质量评审），以“领域无关组件”的形式同时接入了非流式图与流式 RunEngine，并给两者都加上了受控回环。
+
+### 19.1 全景：共享组件 + 双执行路径
+
+| 协同组件 | 文件 | 图路径（/chat） | 流式路径（/chat/stream） |
+| --- | --- | --- | --- |
+| ReAct 观察器 | `agents/react_loop.py`（`ReActObserver`） | `observe_node`（自环） | `RunEngine._react_observe`（薄包装） |
+| 质量评审器 | `agents/critic.py`（`ResponseCritic`） | `critic_node`（回环） | `RunEngine._critic_review_stream` |
+| 单步执行内核 | `tool_node.py` 的 `_invoke_single_step` | `observe_node` 复用 | RunEngine 复用（A 档 A-1 收敛） |
+
+设计文档：《ReAct子图与Critic评审设计方案.md》（§3-§4 设计与§5 Critic，§9 实施记录）。
+
+### 19.2 图内 ReAct 观察循环（observe_node）
+
+**做什么**：工具结果出来后再“多看一眼”——信息不够时，由 LLM 决策追加**一步**只读工具调用，带新结果继续观察，直到 finish 或达到轮数上限。
+
+**关键机制**：
+
+1. **为何自环而不回 `tool_node`**：`tool_node` 每次进入都会重跑全量计划（无幂等保护）；`observe_node` 只执行“自己追加的单步”，用 `observe_node → observe_node` 自环推进；
+2. **领域白名单动态化**：`领域 Agent tool_names ∩ DEFAULT_READONLY_TOOLS`（知识库/数据库/联网搜索三只读工具），交集为空直接 finish——地图类等意图零额外开销；
+3. **轮数控制**：`react_rounds` 计数，达到 `REACT_MAX_ROUNDS` 即停；
+4. **路由依据**：`react_last_added`——本轮追加了步骤 → 自环再来一轮；否则 → `extract_node`；
+5. **reducer 安全**：只返回新增的单条结果（`operator.add` 合并），严禁全量返回；
+6. **降级**：LLM 异常 / JSON 坏 / 工具不在白名单 → finish，主流程不受影响。
+
+**环境变量**：`REACT_LOOP_ENABLED`（默认 1）、`REACT_MAX_ROUNDS`（默认 3）、`REACT_OBSERVE_MODEL`（默认 qwen-flash）。
+
+### 19.3 图内 Critic 评审闭环（critic_node + summarize 改造）
+
+**做什么**：回复生成后，由 LLM 按四维度（事实一致性 / 来源标注 / 完整性 / 无过度承诺）做质量评审；不通过则携反馈打回 `summarize_node` 重生成。
+
+**触发条件（确定性，不命中则零额外开销）**：
+
+- `CRITIC_ENABLED=1`；
+- 响应非空且不超过 `CRITIC_MAX_RESPONSE_CHARS`（默认 6000）；
+- 且满足其一：意图 ∈ {报告生成、知识搜索}，或 工具 ∈ {报告生成/采砂报告/知识库}，且工具执行成功。
+
+**反馈闭环**：
+
+```
+summarize_node（生成回复）→ critic_node（评审）
+  ├─ 通过 / 未命中触发 / 打回无 feedback → 放行 → END
+  └─ 打回 → 清空 response + 写入 _critic_feedback → summarize_node 携反馈重生成 → END
+```
+
+**循环安全（三层保护，防死循环）**：
+
+1. **入口守卫**：`_critic_round > CRITIC_MAX_ROUNDS` 直接放行；
+2. **打回前配额检查**：`_critic_round + 1 > CRITIC_MAX_ROUNDS` 时不再打回（保守放行，保留最新版）；
+3. **反馈消费**：`summarize_node` 生成完成后必清 `_critic_feedback`。
+
+默认 `CRITIC_MAX_ROUNDS=1` ⇒ 恰为“生成 → 评审 → （打回时）修正 → 结束”，**最多 2 次评审、1 次修正**。
+
+**降级策略（保守放行）**：评审异常 / 超时 / JSON 解析失败 → verdict 为 None → 视为通过；打回但 feedback 为空 → 夹紧为通过。**评审永不阻断主流程。**
+
+**环境变量**：`CRITIC_ENABLED`（默认 1）、`CRITIC_MODEL`（默认 qwen-flash）、`CRITIC_MAX_ROUNDS`（默认 1）、`CRITIC_TIMEOUT`（默认 12 秒）、`CRITIC_MAX_RESPONSE_CHARS`（默认 6000）。
+
+### 19.4 流式路径接入（RunEngine._critic_review_stream）
+
+主路径 `_summarize_node` 调用后插入评审（在 `run_in_executor` 线程池中执行，不阻塞事件循环）：
+
+| 事件（status 通道） | 时机 | 前端表现 |
+| --- | --- | --- |
+| `critic` | 评审开始 | “质量评审中”卡片 |
+| `critic_revise` | 打回并携反馈重生成 | “根据评审意见修正答复”卡片（`details` = 问题清单） |
+| `critic_done` | 评审完成 | “质量评审完成”卡片 |
+
+与图路径的差异：流式只做**一次修正**（不做二次评审，符合设计文档 §5.5 伪代码）；修正后若生成为空则回退原稿；评审异常时保守放行（回退原稿、清空反馈）。`critic.review(run_id=...)` 会触发 `obs_generation("critic_review")` 埋点。
+
+### 19.5 验证与测试
+
+| 测试文件 | 覆盖范围 |
+| --- | --- |
+| `tests/test_react_loop.py` | ReActObserver 单元（短路 / 决策 / 白名单 / 降级） |
+| `tests/test_graph_observe.py` | 图的 observe 自环 + critic 回环 + 防死循环 + 零开销 |
+| `tests/test_critic.py` | `should_review` 矩阵 / `review` 契约 / 三类异常降级 |
+| `tests/test_run_engine.py` | 流式三事件顺序 + 打回修正 + 降级直出 |
+
+全量回归：**130 passed**（2026-09）。
+
+### 19.6 新增状态字段速查
+
+| 字段 | 语义 | 更新方式 |
+| --- | --- | --- |
+| `react_rounds` | 已用观察轮数 | 只增不减 |
+| `react_last_added` | 最近一轮是否追加了步骤（路由依据） | 每轮覆盖 |
+| `_critic_round` | 已用修正轮数 | 只增不减 |
+| `_critic_feedback` | 待消费的修正指令 | 打回时写入，summarize 生成后清空 |
+| `_critic_issues` | 问题清单（日志/埋点用） | 覆盖 |

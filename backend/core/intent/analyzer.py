@@ -10,6 +10,8 @@ from typing import Any, Dict, List, Optional
 from langchain_core.messages import SystemMessage, HumanMessage
 from langchain_openai import ChatOpenAI
 
+from core.toolhub.param_validate import render_parameters_text
+
 from .models import GenericIntentResult
 
 logger = logging.getLogger(__name__)
@@ -20,6 +22,9 @@ _EXTRA_INTENT_RULES = """
 2. 每个步骤必须给出可直接执行的 tool 与 params
 3. 不确定时选择最接近的意图，置信度如实给出
 4. 置信度低于 0.6 或无法分类时 primary_intent 使用 unknown
+5. 用户询问助手自身能力/功能范围（如"你能干什么""你会什么""你有什么功能""介绍一下你自己"）时：
+   primary_intent 用 unknown、execution_plan 留空、confidence 0.9，
+   由后端直接生成能力介绍，禁止规划 knowledge_base_tool / web_search_tool 等检索步骤
 """
 
 
@@ -116,13 +121,25 @@ class GenericIntentAnalyzer:
                     break
             if excluded:
                 continue
-            snippet = route.get("constraint") or ""
+            snippet = self._build_tool_snippet(route)
             if snippet:
                 selected.append(snippet)
                 selected_names.add(tool)
                 if len(selected) >= 2:
                     break
         return selected
+
+    @staticmethod
+    def _build_tool_snippet(route: Dict[str, Any]) -> str:
+        """schema 自动渲染（基线，Phase 2）+ 手写 constraint（语义覆盖层）。"""
+        parts: List[str] = []
+        params_text = render_parameters_text(route.get("parameters"))
+        if params_text:
+            parts.append(f"{route.get('name')} 参数 Schema（自动注入）:\n{params_text}")
+        constraint = (route.get("constraint") or "").strip()
+        if constraint:
+            parts.append(constraint)
+        return "\n".join(parts)
 
     def _spec_of(self, tool_name: str) -> Optional[Dict[str, Any]]:
         for t in self.catalog.tools:

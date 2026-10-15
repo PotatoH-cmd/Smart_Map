@@ -27,14 +27,27 @@ AWAITING_INPUT = "awaiting_input"
 COMPLETED = "completed"
 FAILED = "failed"
 CANCELLED = "cancelled"
+# 宕机断点续传（阶段8）：RUNNING 超时 → INTERRUPTED → resume 时置 RESUMING
+INTERRUPTED = "interrupted"
+RESUMING = "resuming"
 
 ALL_STATUSES = (
     RUNNING, AWAITING_CONFIRMATION, AWAITING_INPUT, COMPLETED, FAILED, CANCELLED,
+    INTERRUPTED, RESUMING,
 )
 
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
+
+
+def _percentile(values: List[int], q: float) -> Optional[int]:
+    """简单百分位（最近邻插值）；空列表返回 None。"""
+    if not values:
+        return None
+    s = sorted(values)
+    idx = min(int(round(q * (len(s) - 1))), len(s) - 1)
+    return int(s[idx])
 
 
 @dataclass
@@ -122,11 +135,34 @@ class RunStore:
                 CREATE INDEX IF NOT EXISTS idx_run_events_run
                 ON run_events(run_id, seq)
             """)
+            # 可观测性：runs 表增量列（幂等迁移，老库自动补列）
+            existing_cols = {r[1] for r in conn.execute("PRAGMA table_info(runs)").fetchall()}
+            if "duration_ms" not in existing_cols:
+                conn.execute("ALTER TABLE runs ADD COLUMN duration_ms INTEGER")
+            if "intent_name" not in existing_cols:
+                conn.execute("ALTER TABLE runs ADD COLUMN intent_name TEXT")
+            if "langfuse_trace_id" not in existing_cols:
+                conn.execute("ALTER TABLE runs ADD COLUMN langfuse_trace_id TEXT")
+            # 宕机断点续传（阶段8）：heartbeat 存活探针 + 断点定位
+            if "heartbeat_at" not in existing_cols:
+                conn.execute("ALTER TABLE runs ADD COLUMN heartbeat_at TEXT")
+            if "last_node" not in existing_cols:
+                conn.execute("ALTER TABLE runs ADD COLUMN last_node TEXT")
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS run_checkpoints (
                     run_id TEXT PRIMARY KEY,
                     state_json TEXT NOT NULL,
                     updated_at TEXT NOT NULL
+                )
+            """)
+            # 工具副作用幂等：PRIMARY KEY(run_id, step_id)，命中即跳过重跑复用结果
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS idempotency_keys (
+                    run_id TEXT NOT NULL,
+                    step_id INTEGER NOT NULL,
+                    params_hash TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    PRIMARY KEY (run_id, step_id)
                 )
             """)
             conn.commit()
@@ -152,6 +188,7 @@ class RunStore:
             marks = ",".join("?" * len(ids))
             conn.execute(f"DELETE FROM run_events WHERE run_id IN ({marks})", ids)
             conn.execute(f"DELETE FROM run_checkpoints WHERE run_id IN ({marks})", ids)
+            conn.execute(f"DELETE FROM idempotency_keys WHERE run_id IN ({marks})", ids)
             conn.execute(f"DELETE FROM runs WHERE run_id IN ({marks})", ids)
             conn.commit()
         return len(ids)
@@ -239,6 +276,98 @@ class RunStore:
         return bool(run) and run["status"] == CANCELLED
 
     # ------------------------------------------------------------------
+    # 宕机 watchdog（阶段8）：heartbeat / 老化判定 / 定位
+    # ------------------------------------------------------------------
+
+    def update_heartbeat(self, run_id: str, last_node: str = "") -> None:
+        """运行心跳：工具步骤/节点落盘时更新 heartbeat_at + last_node（断点定位）。"""
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute(
+                "UPDATE runs SET heartbeat_at=?, last_node=?, updated_at=? WHERE run_id=?",
+                (_now_iso(), last_node, _now_iso(), run_id),
+            )
+            conn.commit()
+
+    def mark_interrupted(self, run_id: str) -> None:
+        """RUNNING 且失活超时 → INTERRUPTED（可恢复）。"""
+        self.update_status(run_id, INTERRUPTED)
+
+    def mark_resuming(self, run_id: str) -> None:
+        """启动恢复前置 RESUMING，避免并发重复 resume。"""
+        self.update_status(run_id, RESUMING)
+
+    def get_last_run_by_session(self, session_id: str) -> Optional[Dict[str, Any]]:
+        """返回该会话最近一次 run（按 updated_at 倒序）。无则 None。"""
+        with sqlite3.connect(self.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            row = conn.execute(
+                "SELECT * FROM runs WHERE session_id=? "
+                "ORDER BY updated_at DESC LIMIT 1",
+                (session_id,),
+            ).fetchone()
+        return dict(row) if row else None
+
+    @staticmethod
+    def is_stale_updated_at(updated_at: Optional[str], max_age_seconds: int) -> bool:
+        """判断 updated_at 是否已超过 max_age_seconds 未更新。解析失败视为过期。"""
+        if not updated_at:
+            return True
+        try:
+            ts = datetime.fromisoformat(updated_at)
+        except ValueError:
+            return True
+        now = datetime.now(timezone.utc).astimezone()
+        return (now - ts).total_seconds() > max_age_seconds
+
+    def find_stale_runs(self, max_age_seconds: int,
+                        statuses=("running",)) -> List[Dict[str, Any]]:
+        """返回指定状态中 updated_at 失活超过阈值的 run（未变更状态，供 watchdog 标记）。"""
+        with sqlite3.connect(self.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            marks = ",".join("?" * len(statuses))
+            rows = conn.execute(
+                f"SELECT * FROM runs WHERE status IN ({marks})",
+                list(statuses),
+            ).fetchall()
+        out = []
+        for r in rows:
+            d = dict(r)
+            if self.is_stale_updated_at(d.get("updated_at"), max_age_seconds):
+                out.append(d)
+        return out
+
+    # ------------------------------------------------------------------
+    # 工具副作用幂等（阶段8）：命中即跳过重跑复用结果
+    # ------------------------------------------------------------------
+
+    def record_idempotency_key(self, run_id: str, step_id: int, params_hash: str) -> None:
+        """记录工具步骤幂等 key（INSERT OR IGNORE，重复插入安全）。"""
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute(
+                "INSERT OR IGNORE INTO idempotency_keys (run_id, step_id, params_hash, created_at) "
+                "VALUES (?,?,?,?)",
+                (run_id, step_id, params_hash, _now_iso()),
+            )
+            conn.commit()
+
+    def check_idempotency_key(self, run_id: str, step_id: int) -> bool:
+        """该 (run_id, step_id) 是否已执行过（存过 key）。"""
+        with sqlite3.connect(self.db_path) as conn:
+            row = conn.execute(
+                "SELECT 1 FROM idempotency_keys WHERE run_id=? AND step_id=?",
+                (run_id, step_id),
+            ).fetchone()
+        return row is not None
+
+    def delete_idempotency_key(self, run_id: str, step_id: int) -> None:
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute(
+                "DELETE FROM idempotency_keys WHERE run_id=? AND step_id=?",
+                (run_id, step_id),
+            )
+            conn.commit()
+
+    # ------------------------------------------------------------------
     # 事件流
     # ------------------------------------------------------------------
 
@@ -304,6 +433,137 @@ class RunStore:
         with sqlite3.connect(self.db_path) as conn:
             conn.execute("DELETE FROM run_checkpoints WHERE run_id=?", (run_id,))
             conn.commit()
+
+    # ------------------------------------------------------------------
+    # 可观测性：指标写入 + 聚合查询（供 routers/obs.py）
+    # ------------------------------------------------------------------
+
+    def set_run_metrics(self, run_id: str, duration_ms: Optional[int],
+                        intent_name: str = "", langfuse_trace_id: str = "") -> None:
+        """run 终态时写入观测指标列（部分列缺省时保留旧值）。"""
+        sets, params = [], []
+        if duration_ms is not None:
+            sets.append("duration_ms=?"); params.append(int(duration_ms))
+        if intent_name:
+            sets.append("intent_name=?"); params.append(intent_name)
+        if langfuse_trace_id:
+            sets.append("langfuse_trace_id=?"); params.append(langfuse_trace_id)
+        if not sets:
+            return
+        params += [_now_iso(), run_id]
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute(f"UPDATE runs SET {', '.join(sets)}, updated_at=? WHERE run_id=?", params)
+            conn.commit()
+
+    def list_runs(self, limit: int = 50, status: Optional[str] = None,
+                  days: Optional[int] = None) -> List[Dict[str, Any]]:
+        """run 列表（倒序）。可选按状态过滤、按天数过滤。"""
+        sql = ("SELECT run_id, session_id, status, user_message, intent_name, duration_ms, "
+               "langfuse_trace_id, created_at, updated_at FROM runs")
+        conds, params = [], []
+        if status:
+            conds.append("status=?"); params.append(status)
+        if days:
+            cutoff = (datetime.now(timezone.utc).astimezone()
+                      - timedelta(days=days)).isoformat(timespec="seconds")
+            conds.append("created_at>=?"); params.append(cutoff)
+        if conds:
+            sql += " WHERE " + " AND ".join(conds)
+        sql += " ORDER BY created_at DESC LIMIT ?"
+        params.append(max(1, min(int(limit), 500)))
+        with sqlite3.connect(self.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(sql, params).fetchall()
+        out = []
+        for r in rows:
+            d = dict(r)
+            d["user_message"] = (d.get("user_message") or "")[:120]
+            d["event_count"] = self._count_events(d["run_id"])
+            out.append(d)
+        return out
+
+    def _count_events(self, run_id: str) -> int:
+        with sqlite3.connect(self.db_path) as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) FROM run_events WHERE run_id=?", (run_id,)
+            ).fetchone()
+        return int(row[0]) if row else 0
+
+    def get_overview(self, days: int = 7) -> Dict[str, Any]:
+        """KPI 聚合：状态分布 / 成功率 / 平均耗时 / 今日量 / 意图分布。"""
+        cutoff = (datetime.now(timezone.utc).astimezone()
+                  - timedelta(days=days)).isoformat(timespec="seconds")
+        with sqlite3.connect(self.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                "SELECT status, intent_name, duration_ms, created_at FROM runs "
+                "WHERE created_at>=?", (cutoff,),
+            ).fetchall()
+        total = len(rows)
+        by_status: Dict[str, int] = {}
+        by_intent: Dict[str, int] = {}
+        durations = []
+        today_prefix = _now_iso()[:10]
+        today = 0
+        for r in rows:
+            by_status[r["status"]] = by_status.get(r["status"], 0) + 1
+            intent = r["intent_name"] or "(未知)"
+            by_intent[intent] = by_intent.get(intent, 0) + 1
+            if r["duration_ms"] is not None:
+                durations.append(int(r["duration_ms"]))
+            if (r["created_at"] or "").startswith(today_prefix):
+                today += 1
+        completed = by_status.get(COMPLETED, 0)
+        failed = by_status.get(FAILED, 0)
+        finished = completed + failed
+        top_intents = sorted(by_intent.items(), key=lambda kv: -kv[1])[:8]
+        return {
+            "days": days,
+            "total": total,
+            "today": today,
+            "by_status": by_status,
+            "success_rate": round(completed / finished, 4) if finished else None,
+            "avg_duration_ms": int(sum(durations) / len(durations)) if durations else None,
+            "p95_duration_ms": _percentile(durations, 0.95),
+            "top_intents": [{"intent": k, "count": v} for k, v in top_intents],
+        }
+
+    def get_tool_stats(self, days: int = 7) -> List[Dict[str, Any]]:
+        """工具性能聚合：从 run_events 的 tool_result payload 提取（调用数/成功率/平均/P95 耗时）。"""
+        cutoff = (datetime.now(timezone.utc).astimezone()
+                  - timedelta(days=days)).isoformat(timespec="seconds")
+        with sqlite3.connect(self.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                "SELECT payload FROM run_events WHERE event_type='tool_result' AND created_at>=?",
+                (cutoff,),
+            ).fetchall()
+        agg: Dict[str, Dict[str, Any]] = {}
+        for r in rows:
+            try:
+                ev = json.loads(r["payload"])
+            except (json.JSONDecodeError, TypeError):
+                continue
+            tool = ev.get("tool_name") or "unknown"
+            slot = agg.setdefault(tool, {"calls": 0, "ok": 0, "durations": []})
+            slot["calls"] += 1
+            if ev.get("success") is True:
+                slot["ok"] += 1
+            ms = ev.get("elapsed_ms")
+            if isinstance(ms, (int, float)) and ms >= 0:
+                slot["durations"].append(int(ms))
+        out = []
+        for tool, s in agg.items():
+            ds = s["durations"]
+            out.append({
+                "tool": tool,
+                "calls": s["calls"],
+                "success_rate": round(s["ok"] / s["calls"], 4) if s["calls"] else None,
+                "avg_ms": int(sum(ds) / len(ds)) if ds else None,
+                "p95_ms": _percentile(ds, 0.95),
+            })
+        out.sort(key=lambda x: -x["calls"])
+        return out
 
 
 # 进程级单例（main.py 启动时可通过 RunStore(db_path=...) 重建覆盖）

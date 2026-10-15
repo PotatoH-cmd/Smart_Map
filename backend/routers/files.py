@@ -90,9 +90,35 @@ async def preview_report(filename: str = Query(..., description="报告文件名
     file_path = os.path.join(_BACKEND_DIR, "static", "reports", safe_name)
     if not os.path.exists(file_path):
         raise HTTPException(status_code=404, detail=f"报告文件不存在: {safe_name}")
+    import uuid
+    _preview_dir = os.path.join(_BACKEND_DIR, "static", "reports", "preview_images")
+    os.makedirs(_preview_dir, exist_ok=True)
+
+    def _extract_image(image):
+        """把 docx 内嵌图片落盘为 static 文件，返回可访问 URL。
+        默认 mammoth 会把图片转成 data:base64 内联，docx 含大图时（如正射影像）
+        HTML 可达数 MB，导致前端预览加载缓慢/渲染不完整（用户误以为缺章节）。
+        改为外链后 HTML 降至 KB 级，预览稳定、完整显示全部章节（含现场监测）。
+        """
+        try:
+            with image.open() as fh:  # mammoth Image.open() 返回上下文管理器封装的文件对象
+                buf = fh.read()
+            ctype = getattr(image, "content_type", "") or ""
+            ext = {".png": "png", ".jpeg": "jpg", ".gif": "gif"}.get(
+                f".{ctype.split('/')[-1].lower()}", "png")
+            name = f"preview_{uuid.uuid4().hex}.{ext}"
+            out = os.path.join(_preview_dir, name)
+            with open(out, "wb") as wf:
+                wf.write(buf)
+            return {"src": f"/static/reports/preview_images/{name}"}
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"[Preview] 图片落盘失败: {e}")
+            return {"src": ""}
+
     try:
         with open(file_path, "rb") as f:
-            result = mammoth.convert_to_html(f)
+            result = mammoth.convert_to_html(
+                f, convert_image=mammoth.images.img_element(_extract_image))
         html_body = result.value
         warnings = result.messages
         if warnings:

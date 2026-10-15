@@ -7,7 +7,7 @@ import json
 import logging
 import operator
 import os
-import re
+import time
 from typing import Annotated, List, Dict, Any, Optional, TypedDict, AsyncGenerator
 from urllib.parse import quote
 
@@ -18,14 +18,131 @@ from langgraph.graph import END
 from ..intent_types import IntentType, IntentResult, TaskStep
 from ..qgis_workflows import match_recipe, extract_params, substitute_params, RECIPES
 from ..state import AgentState, QwenToolAdapter
+from ..providers import apply_corrections
+from core.obs import obs_generation
 
 logger = logging.getLogger(__name__)
+
+# 豫水地图助手能力介绍（能力咨询类请求的预制回复，不走 LLM，
+# 避免 LLM 编造"通用聊天助手"式自我介绍，不符合豫水地图助手业务定位）
+YUSHUI_CAPABILITY_INTRO = """我是豫水地图助手，专注于水利采砂监测与河道管理业务。我可以协助您完成以下工作：
+
+一、采砂监测报告
+• 生成采砂场/可采区采砂监测分析报告（含 RTK 测点统计、无人机正射影像解译、高程与超深评估、现场监测情况，输出 Word 报告）
+
+二、地图操作
+• 切换卫星影像/街道底图，加载采区、河道管理范围线等矢量图层
+• 地图定位、2D/3D 飞行浏览、标记与清除标记
+
+三、数据查询
+• RTK 测点与测深数据统计：控制开采高程、实测高程、超深度开采分析
+• 采区边界、河道管理红线等空间参考数据查询
+
+四、空间分析与处理
+• 缓冲区分析、影像裁剪、叠加分析、面积计算、红线距离分析
+• 坐标投影转换（CGCS2000 带号换算）、XY 坐标交换、矢量面/线/点生成
+
+五、知识检索
+• 水利政策法规、采砂管理规定、技术标准等知识库文档查询
+
+六、数据可视化
+• 柱状图、饼图、折线图等统计图表生成
+
+示例："生成中山村采区采砂场监测报告"、"切换到卫星底图"、"查询史河毕店可采区2025年控制开采高程范围"。"""
+
+
+# ── 导航类请求（飞到X / 飞往X / 定位到X）的确定性地名提取 ──
+# 这些词在 fast_routes.json 中路由为 map_display/location_search，而快速路由给不出
+# execution_plan：空计划 → 无工具调用 → 直达 summarize_node，LLM 凭空回答"已飞抵"，
+# 前端收不到任何相机命令，视角不动。导航请求改为确定性单步 location_search 计划
+# （该工具同时产出 2D set_view 与 3D flyTo 两条命令，2D/3D 视图各自消费自己那条）。
+_NAV_VERBS = ("飞往", "飞到", "飞至", "fly to", "flyto", "跳转到", "导航到", "定位到")
+_NAV_LEADS = ("请", "帮我", "麻烦", "我想", "我要", "把视角", "视角", "镜头", "地图")
+_NAV_TAILS = ("的位置", "的坐标", "那里", "那个地方", "去看看", "看看", "查看",
+              "上空", "附近", "一带", "区域", "位置", "处")
+
+
+def extract_nav_location(user_msg: str) -> str:
+    """从导航类请求中提取目标地名；非导航请求或地名不可用时返回空串。
+
+    "请帮我飞到郏县北汝河处" → "郏县北汝河"
+    """
+    text = (user_msg or "").strip()
+    lower = text.lower()
+    hit = None
+    for verb in _NAV_VERBS:
+        idx = lower.find(verb)
+        if idx >= 0 and (hit is None or idx < hit[0]):
+            hit = (idx, verb)
+    if hit is None:
+        return ""
+    idx, verb = hit
+    name = text[idx + len(verb):].strip()
+    for lead in _NAV_LEADS:
+        if name.startswith(lead):
+            name = name[len(lead):].strip()
+    for tail in _NAV_TAILS:
+        if name.endswith(tail):
+            name = name[:-len(tail)].strip()
+            break
+    name = name.strip("，。！？、,.!?")
+    return name if 1 <= len(name) <= 20 else ""
 
 
 class IntentNodeMixin:
     # ------------------------------------------------------------------
     # 节点实现
     # ------------------------------------------------------------------
+
+    # ------------------------------------------------------------------
+    # 快速路由的最小执行计划（规则声明式，杜绝空计划直达汇总节点编造结果）
+    # ------------------------------------------------------------------
+    # 参数占位符：$msg → 用户原文；$loc → 按导航词提取出的地名（提取失败回退原文）
+    _FAST_PARAM_LOC = "$loc"
+
+    def _resolve_fast_params(self, params: Dict[str, Any], user_msg: str) -> Dict[str, Any]:
+        """解析规则参数中的占位符。"""
+        resolved: Dict[str, Any] = {}
+        for key, value in (params or {}).items():
+            if isinstance(value, str) and value.startswith("$"):
+                if value == self._FAST_PARAM_LOC:
+                    resolved[key] = extract_nav_location(user_msg) or user_msg
+                else:
+                    resolved[key] = user_msg
+            else:
+                resolved[key] = value
+        return resolved
+
+    def _build_fast_route_plan(self, rule: Dict[str, Any], user_msg: str,
+                               view_hint: Optional[str] = None) -> Optional[IntentResult]:
+        """按规则声明的最小执行计划构造单步 IntentResult；规则未声明计划时返回 None。
+
+        3D 视图优先使用规则声明的 tool_cesium/params_cesium（地图类工具与视图绑定）。
+        """
+        tool = rule.get("tool")
+        params = rule.get("params") or {}
+        if view_hint == "cesium" and rule.get("tool_cesium"):
+            tool = rule["tool_cesium"]
+            params = rule.get("params_cesium") or {}
+        if not tool:
+            return None
+        resolved = self._resolve_fast_params(params, user_msg)
+        return IntentResult(
+            primary_intent=rule["intent"],
+            confidence=0.95,
+            entities=[],
+            task_context=f"快速路由：{rule['intent'].value}（关键词「{rule['keyword']}」）",
+            execution_plan=[TaskStep(
+                step_id=1,
+                action=f"执行「{rule['keyword']}」对应的操作",
+                tool=tool,
+                params=resolved,
+                reasoning="快速路由命中关键词，规则已声明最小执行计划，直接调用工具执行",
+                expected_output="返回工具执行结果，并生成对应的地图/相机命令",
+            )],
+            requires_confirmation=False,
+            suggestions=[],
+        )
 
     def _intent_node(self, state: AgentState, workspace_summary: str = "") -> AgentState:
         """节点1：意图识别。支持快速路由（关键词匹配绕过 LLM）。
@@ -35,35 +152,70 @@ class IntentNodeMixin:
         """
         user_msg = state["user_message"]
 
-        # 尝试快速路由
-        # 注意：以下意图不能走快速路由——快速路由的 execution_plan 为空，
-        # 会导致不调用工具就直达 summarize_node，让 LLM 凭空回答"已完成"。
-        # 这些意图必须由 LLM 规划出具体工具步骤。
-        fast_intent = self.harness.try_fast_classify(user_msg)
-        NO_FAST_ROUTE_INTENTS = {
-            IntentType.REPORT_GENERATION,  # 报告生成
-            IntentType.SPATIAL_ANALYSIS,   # 空间分析（缓冲/裁剪/叠加/面积等）
-            IntentType.SPATIAL_PROCESSING, # 空间数据处理（坐标转换等）
-            IntentType.SPATIAL_REFERENCE,  # 空间参考（需 LLM 规划 spatial_reference_tool+postgresql_tool 步骤，避免空计划直达总结编造答案）
-        }
-        if fast_intent in NO_FAST_ROUTE_INTENTS:
-            fast_intent = None
-        if fast_intent is not None:
-            # 构建轻量 IntentResult 跳过 LLM 调用
+        # ── 导航类请求：确定性单步计划（不走快速路由的空计划，也不依赖 LLM 规划）──
+        nav_location = extract_nav_location(user_msg)
+        if nav_location:
             intent_result = IntentResult(
-                primary_intent=fast_intent,
+                primary_intent=IntentType.LOCATION_SEARCH,
                 confidence=0.95,
-                entities=[],
-                task_context=f"快速路由：{fast_intent.value}",
-                execution_plan=[],
+                entities=[nav_location],
+                task_context=f"快速路由：位置导航（{nav_location}）",
+                execution_plan=[TaskStep(
+                    step_id=1,
+                    action=f"查找「{nav_location}」的坐标并跳转",
+                    tool="location_search",
+                    params={"location_name": nav_location},
+                    reasoning="导航类请求需先解析地名坐标，再下发相机跳转命令",
+                    expected_output="返回坐标，并生成 2D set_view / 3D flyTo 命令",
+                )],
                 requires_confirmation=False,
                 suggestions=[],
             )
             state["intent_result"] = intent_result
-            logger.info(
-                f"[intent_node] Fast route: intent={fast_intent.value}, confidence=0.95"
-            )
+            logger.info(f"[intent_node] Nav route: location_search(location_name={nav_location!r})")
             return state
+
+        # 尝试快速路由：规则自带最小执行计划则确定性执行；未声明计划的规则回退 LLM 规划。
+        # 不允许用空 execution_plan 短路 —— 空计划不调用任何工具就直达 summarize_node，
+        # 会让 LLM 凭空回答"已完成"（历史缺陷，见 fast_routes.json 的 _plan_comment）。
+        fast_rule = self.harness.try_fast_route(user_msg)
+        fast_intent = fast_rule["intent"] if fast_rule else None
+        if fast_rule is not None:
+            # 规则自带最小执行计划 → 构造确定性单步计划直接执行工具
+            fast_plan = self._build_fast_route_plan(fast_rule, user_msg, state.get("view_hint"))
+            if fast_plan is not None:
+                state["intent_result"] = fast_plan
+                logger.info(
+                    f"[intent_node] Fast route: keyword='{fast_rule['keyword']}', "
+                    f"intent={fast_intent.value}, tool={fast_plan.execution_plan[0].tool}"
+                )
+                return state
+            # 能力咨询（"你能干什么"等，路由为 unknown）无需工具，直接写入预制介绍。
+            # 若走 LLM 汇总，模型缺少豫水地图助手人设，会生成通用聊天助手自我介绍。
+            # 此处直接透传预制文案（summarize_node 对已有 response 原样透传，不再调 LLM）。
+            if fast_intent == IntentType.UNKNOWN:
+                state["intent_result"] = IntentResult(
+                    primary_intent=fast_intent,
+                    confidence=0.95,
+                    entities=[],
+                    task_context=f"快速路由：{fast_intent.value}",
+                    execution_plan=[],
+                    requires_confirmation=False,
+                    suggestions=[],
+                )
+                state["response"] = YUSHUI_CAPABILITY_INTRO
+                state["map_commands"] = []
+                state["cesium_commands"] = []
+                state["charts"] = []
+                state["tool_results"] = []
+                logger.info("[intent_node] Capability intro: prebuilt response injected, skipping LLM")
+                return state
+
+            # 规则未声明最小执行计划 → 不短路，交由下方 LLM 规划出具体工具步骤
+            logger.info(
+                f"[intent_node] Fast route without plan: keyword='{fast_rule['keyword']}', "
+                f"intent={fast_intent.value} → fallback to LLM planning"
+            )
 
         # 未命中快速路由，走 LLM 意图分析
         analysis_input = user_msg
@@ -71,9 +223,11 @@ class IntentNodeMixin:
             analysis_input = f"{workspace_summary}\n\n【用户本轮输入】\n{user_msg}"
 
         # 服务化路径：INTENT_SERVICE_URL 配置时优先走意图服务，失败回退进程内 IntentAgent
+        t_llm = time.perf_counter()
         intent_result = self._remote_intent_analyze(
             analysis_input, state.get("chat_history"), state.get("view_hint"))
-        if intent_result is not None:
+        remote_used = intent_result is not None
+        if remote_used:
             logger.info("[intent_node] Remote intent service used")
         else:
             # 阶段6：view_hint 用于地图类工具约束的按需注入（2D/3D 二选一）
@@ -82,6 +236,25 @@ class IntentNodeMixin:
                 state.get("chat_history"),
                 view_hint=state.get("view_hint"),
             )
+        # 可观测性：意图分析 LLM 调用（remote / local 均上报）
+        try:
+            _llm = getattr(self.intent_agent, "structured_llm", None)
+            _model = (getattr(_llm, "model_name", None) or getattr(_llm, "model", None)
+                      or ("intent-service" if remote_used else "unknown"))
+            obs_generation(
+                run_id=state.get("_run_id", ""),
+                name="intent_analysis" + ("_remote" if remote_used else ""),
+                model=str(_model),
+                prompt=analysis_input,
+                completion={
+                    "intent": str(getattr(intent_result, "primary_intent", "")),
+                    "confidence": getattr(intent_result, "confidence", None),
+                    "steps": len(getattr(intent_result, "execution_plan", []) or []),
+                },
+                usage=None,
+            )
+        except Exception:
+            pass  # 观测埋点失败不影响主流程
 
         # ── 修复：LLM 有时漏填 tool 字段，导致 _route_after_intent 跳过 tool_node ──
         # 对于空间分析/处理类意图，若 execution_plan 有步骤但未指定 tool，自动补全
@@ -97,22 +270,12 @@ class IntentNodeMixin:
                     step.tool = auto_tool
                     logger.info(f"[intent_node] Auto-assigned tool={auto_tool} for step {step.step_id}")
 
-        # ── 规则化兑底：数值查询误判为 spatial_reference 时改判 data_query ──
-        # 例："史河毕店可采区的2025年控制开采高程范围是多少"含"可采区"，
-        # LLM 可能受空间参考规则误导判为 spatial_reference；此时按模板构造
-        # postgresql_tool 查询步骤查 ceshen 表，用真实数据回答，避免凭空编造数值。
-        fallback_step = None
-        if intent_result.primary_intent == IntentType.SPATIAL_REFERENCE:
-            numeric_hit = any(k in user_msg for k in ("高程", "深度", "超深", "多少", "几个", "数量"))
-            spatial_hit = any(k in user_msg for k in ("范围内", "附近", "周边", "离", "距"))
-            if numeric_hit and not spatial_hit:
-                fallback_step = self._build_numeric_fallback_step(user_msg)
-        if fallback_step is not None:
-            intent_result.primary_intent = IntentType.DATA_QUERY
-            intent_result.execution_plan = [fallback_step]
-            intent_result.task_context = f"数值查询兑底：{user_msg}"
-            intent_result.confidence = 0.98
-            logger.info("[intent_node] Numeric-query fallback: spatial_reference → data_query")
+        # ── 确定性计划纠正 ──
+        # 各业务主题（红线距离/测深加载/缓冲区/坐标转矢量/数值查询/砂场统计/报告裁剪）
+        # 的"确定性兑底"收敛到 providers 注册表，此处仅依注册顺序逐个应用
+        # （后纠正覆盖前纠正，语义与迁移前串行覆盖完全一致）。
+        for correction_desc in apply_corrections(user_msg, intent_result):
+            logger.info(f"[intent_node] {correction_desc}")
 
         logger.info(
             f"[intent_node] LLM route: intent={intent_result.primary_intent}, "
@@ -165,48 +328,6 @@ class IntentNodeMixin:
             logger.warning(f"[intent_node] Intent service unavailable, fallback local: {e}")
             return None
 
-    def _build_numeric_fallback_step(self, user_msg: str) -> Optional[TaskStep]:
-        """数值查询兑底：构造 postgresql_tool 步骤查 ceshen 表。
-
-        适用：LLM 把"XX可采区/砂场的（控制开采）高程/深度/数量是多少"误判为
-        spatial_reference 等非数据查询意图时，用确定性模板 SQL 查询真实数据，
-        避免 LLM 在无数据依据时凭空编造数值。
-        """
-        site_m = re.search(r"([\u4e00-\u9fa5]{2,20}?(?:可采区|砂场|采区))", user_msg or "")
-        if not site_m:
-            return None
-        site = site_m.group(1).replace("的", "").strip()
-        year_m = re.search(r"(20\d{2})", user_msg or "")
-
-        cols: List[str]
-        if "控制" in user_msg and "高程" in user_msg:
-            cols = ['MIN("Control_Elevation") AS min_ctrl', 'MAX("Control_Elevation") AS max_ctrl']
-        elif "实测" in user_msg and ("高程" in user_msg or "深度" in user_msg):
-            cols = ['MIN("Measured_Depth") AS min_measured', 'MAX("Measured_Depth") AS max_measured']
-        elif "超深" in user_msg:
-            cols = ['ROUND(AVG("Control_Elevation" - "Measured_Depth")::numeric, 3) AS avg_diff_m']
-        elif "高程" in user_msg or "深度" in user_msg:
-            cols = [
-                'MIN("Measured_Depth") AS min_measured', 'MAX("Measured_Depth") AS max_measured',
-                'MIN("Control_Elevation") AS min_ctrl', 'MAX("Control_Elevation") AS max_ctrl',
-            ]
-        elif "多少" in user_msg or "几个" in user_msg or "数量" in user_msg:
-            cols = ['COUNT(DISTINCT "Mineable_Area_Name") AS site_count', 'COUNT(*) AS point_count']
-        else:
-            return None
-
-        where = f'"Mineable_Area_Name" LIKE \'%{site}%\''
-        if year_m:
-            where += f' AND "Year" = {year_m.group(1)}'
-        sql = f"SELECT {', '.join(cols)} FROM ceshen WHERE {where}"
-        return TaskStep(
-            step_id=1,
-            action=f"查询 {site} 的数值信息",
-            tool="postgresql_tool",
-            params={"operation": "query", "sql": sql, "params": []},
-            reasoning="数值查询兑底：从 ceshen 表查询真实数据",
-            expected_output="返回查询结果",
-        )
 
     # ------------------------------------------------------------------
     # 意图路由

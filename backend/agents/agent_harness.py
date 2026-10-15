@@ -11,11 +11,11 @@ P1 收敛说明：不再在 __init__ 重复构造 IntentAgent/ToolRegistry
 """
 import logging
 from datetime import datetime
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional
 
 from .intent_types import IntentType, IntentResult
 from .base_agent import BaseAgent
-from config.fast_route_loader import load_fast_routes
+from config.fast_route_loader import load_fast_route_rules
 
 logger = logging.getLogger(__name__)
 
@@ -25,8 +25,9 @@ class AgentHarness:
 
     def __init__(self, llm_cfg: Dict):
         self.llm_cfg = llm_cfg
-        # 快速路由表（JSON 配置优先，不可用时回退 loader 内置默认）
-        self._fast_routes: List[Tuple[str, IntentType]] = load_fast_routes()
+        # 快速路由规则（JSON 配置优先，不可用时回退 loader 内置默认）
+        # 每条规则可自带最小执行计划（tool/params），未声明计划的规则不短路执行
+        self._fast_route_rules: List[Dict] = load_fast_route_rules()
 
         # 懒加载 Agent 实例
         self._agents: Dict[IntentType, BaseAgent] = {}
@@ -85,17 +86,22 @@ class AgentHarness:
     # 快速路由（关键词 → IntentType，JSON 权威 + loader 内置默认兜底）
     # ------------------------------------------------------------------
 
+    def try_fast_route(self, user_message: str) -> Optional[Dict]:
+        """快速关键词匹配。命中返回完整规则（含可选最小执行计划），未命中返回 None。"""
+        msg_lower = user_message.lower().replace(" ", "")
+        for rule in self._fast_route_rules:
+            if rule["keyword"].lower().replace(" ", "") in msg_lower:
+                logger.info(
+                    f"[AgentHarness] Fast route hit: keyword='{rule['keyword']}' → "
+                    f"intent={rule['intent'].value}, has_plan={bool(rule['tool'])}"
+                )
+                return rule
+        return None
+
     def try_fast_classify(self, user_message: str) -> Optional[IntentType]:
         """快速关键词匹配。命中返回 IntentType，未命中返回 None。"""
-        routes = self._fast_routes
-        msg_lower = user_message.lower().replace(" ", "")
-        for keyword, intent in routes:
-            if keyword.lower().replace(" ", "") in msg_lower:
-                logger.info(
-                    f"[AgentHarness] Fast route hit: keyword='{keyword}' → intent={intent.value}"
-                )
-                return intent
-        return None
+        rule = self.try_fast_route(user_message)
+        return rule["intent"] if rule else None
 
     # ------------------------------------------------------------------
     # 提示词组装

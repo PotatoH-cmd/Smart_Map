@@ -8,6 +8,7 @@ test_run_engine.py — 阶段7：RunEngine 状态机全流转。
   RUNNING → CANCELLED（中断点停止 + cancelled 事件）
   RUNNING → FAILED（超时兜底 / 异常兜底）
   直答路径（无工具步骤）
+  P1 流式评审闭环：critic 打回 → critic_revise 事件 → 携反馈重生成 → critic_done → final
 """
 import asyncio
 import os
@@ -26,6 +27,12 @@ from agents.run_store import (
 from agents.event_bus import EventBus
 from agents.run_engine import RunEngine
 from agents.intent_types import IntentType, IntentResult, TaskStep
+
+
+@pytest.fixture(autouse=True)
+def _disable_react_loop(monkeypatch):
+    """旧用例保持改造前行为（ReAct 循环在 test_react_loop.py 专项覆盖，避免真实 LLM 调用）。"""
+    monkeypatch.setenv("REACT_LOOP_ENABLED", "0")
 
 
 # ----------------------------------------------------------------------
@@ -95,6 +102,16 @@ class FakeExecutor:
     def _normalize_tool_params(self, tool, params, user_message, step):
         return dict(params or {})
 
+    async def _invoke_single_step(self, state, step, extra_params=None, params_override=None):
+        """公共执行内核（与 TaskExecutor._invoke_single_step 同形，A 档 A-1 收敛后 RunEngine 依赖）。"""
+        params = params_override if params_override is not None else (step.params or {})
+        if extra_params:
+            params.update(extra_params)
+        adapter = self._get_tool_adapter(step.tool)
+        if adapter is None:
+            return {"tool_name": step.tool, "result": {"success": False, "error": f"工具 {step.tool} 不可用"}}
+        return await asyncio.get_event_loop().run_in_executor(None, adapter.invoke, params)
+
     async def _fallback_knowledge_search(self, ordered_results, user_message, invoke_bare):
         return ordered_results
 
@@ -118,6 +135,43 @@ class FakeExecutor:
             "cesium_commands": [], "charts": [], "report_url": None,
             "intent_info": None, "requires_confirmation": False,
         }
+
+
+class FakeCritic:
+    """可控评审假件（流式路径）：verdicts 依次弹出；reviewable=False 时零开销直通。"""
+
+    def __init__(self, verdicts=None, reviewable=True, max_rounds=1):
+        self.verdicts = list(verdicts or [])
+        self.reviewable = reviewable
+        self.max_rounds = max_rounds
+        self.review_calls = 0
+
+    def should_review(self, intent_result, tool_results, response_text):
+        return self.reviewable
+
+    def review(self, **kwargs):
+        self.review_calls += 1
+        if not self.verdicts:
+            return None
+        return self.verdicts.pop(0)
+
+
+class FakeCriticExecutor(FakeExecutor):
+    """带 critic 的最小 executor：summarize 模拟真实反馈消费契约（生成后清空反馈）。"""
+
+    def __init__(self, intent_result, critic, adapter=None):
+        super().__init__(intent_result, adapter=adapter)
+        self.critic = critic
+        self.summarize_calls = 0
+
+    def _summarize_node(self, state):
+        self.summarize_calls += 1
+        if state.get("_critic_feedback"):
+            state["response"] = "修正后的回复"
+            state["_critic_feedback"] = None
+        else:
+            state["response"] = "这是最终回复"
+        return state
 
 
 def _make_intent(confirmation=False, plan=None, intent_type=IntentType.DATA_QUERY):
@@ -387,3 +441,115 @@ def test_resume_without_checkpoint(tmp_path):
     task = _run(main())
     assert task is None
     assert store.get_run("no_such_run") is None
+
+
+# ----------------------------------------------------------------------
+# P1：流式评审闭环（critic / critic_revise / critic_done 事件 + 修正重生成）
+# ----------------------------------------------------------------------
+
+def _make_critic_engine(tmp_path, intent, critic, adapter=None):
+    store = RunStore(db_path=str(tmp_path / "r.db"))
+    exe = FakeCriticExecutor(intent, critic, adapter=adapter)
+    engine = RunEngine(exe, store=store, bus=EventBus(store), gateway=None, timeout=600)
+    return engine, store, exe
+
+
+def test_stream_critic_reject_revises_before_final(tmp_path):
+    """打回：critic → critic_revise → 携反馈重生成 → critic_done → done → final（修正版）。"""
+    plan = [TaskStep(step_id=1, action="查询", tool="postgresql_tool",
+                     params={"operation": "query"}, reasoning="", expected_output="")]
+    critic = FakeCritic(verdicts=[{
+        "passed": False, "severity": "major",
+        "issues": ["数字与工具结果不一致"], "feedback": "改为工具结果中的数字",
+    }])
+    engine, store, exe = _make_critic_engine(tmp_path, _make_intent(plan=plan), critic)
+
+    async def main():
+        task = await engine.start("r1", "s1", "查数据")
+        await task
+    _run(main())
+
+    assert store.get_run("r1")["status"] == COMPLETED
+    events = store.get_events("r1")
+    stages = [e["stage"] for e in events if e["type"] == "status"]
+    # 事件顺序：critic → critic_revise → critic_done → done（均在 final 之前）
+    assert stages.index("critic") < stages.index("critic_revise") < stages.index("critic_done")
+    assert stages.index("critic_done") < stages.index("done")
+    assert events[-1]["type"] == "final"
+    assert events[-1]["result"]["response"] == "修正后的回复"
+    # critic_revise 事件携带问题清单
+    revise = [e for e in events if e["stage"] == "critic_revise"][0]
+    assert revise["details"] == ["数字与工具结果不一致"]
+    # 一次评审、两次生成（初版 + 修正）
+    assert critic.review_calls == 1
+    assert exe.summarize_calls == 2
+
+
+def test_stream_critic_not_triggered_zero_overhead(tmp_path):
+    """触发判定不命中 → 不调评审、无 critic 事件、不重生成。"""
+    plan = [TaskStep(step_id=1, action="查询", tool="postgresql_tool",
+                     params={}, reasoning="", expected_output="")]
+    critic = FakeCritic(reviewable=False)
+    engine, store, exe = _make_critic_engine(tmp_path, _make_intent(plan=plan), critic)
+
+    async def main():
+        task = await engine.start("r1", "s1", "查数据")
+        await task
+    _run(main())
+
+    events = store.get_events("r1")
+    stages = [e["stage"] for e in events if e["type"] == "status"]
+    assert "critic" not in stages and "critic_revise" not in stages
+    assert critic.review_calls == 0
+    assert exe.summarize_calls == 1
+    assert events[-1]["result"]["response"] == "这是最终回复"
+
+
+def test_stream_critic_degrades_to_pass(tmp_path):
+    """评审返回 None（异常降级）→ 已发起评审但不修正，原稿直出。"""
+    plan = [TaskStep(step_id=1, action="查询", tool="postgresql_tool",
+                     params={}, reasoning="", expected_output="")]
+    critic = FakeCritic(verdicts=[None])
+    engine, store, exe = _make_critic_engine(tmp_path, _make_intent(plan=plan), critic)
+
+    async def main():
+        task = await engine.start("r1", "s1", "查数据")
+        await task
+    _run(main())
+
+    events = store.get_events("r1")
+    stages = [e["stage"] for e in events if e["type"] == "status"]
+    assert "critic" in stages  # 已发起评审
+    assert "critic_revise" not in stages and "critic_done" not in stages
+    assert exe.summarize_calls == 1
+    assert events[-1]["result"]["response"] == "这是最终回复"
+
+
+# ----------------------------------------------------------------------
+# Phase 1：缺参检测 schema 基线（声明驱动，机器参数不反问）
+# ----------------------------------------------------------------------
+
+def test_detect_missing_params_schema_baseline(tmp_path):
+    plan = [TaskStep(step_id=1, action="生成报告", tool="caisha_report_tool",
+                     params={}, reasoning="", expected_output="")]
+    intent = _make_intent(plan=plan)
+    engine, store, exe = _make_engine(tmp_path, intent)
+    exe._get_tool_parameters = lambda tool: [
+        {"name": "site_name", "type": "string", "description": "砂场名称", "required": True},
+        {"name": "operation", "type": "string", "required": True},  # 机器参数：不反问
+    ]
+    missing = engine._detect_missing_params(intent, "生成郝楼砂场的报告", None)
+    assert {"param": "site_name", "label": "砂场名称", "tool": "caisha_report_tool"} in missing
+    assert all(m["param"] != "operation" for m in missing)
+    # 参数已提供 → 不反问
+    plan[0].params["site_name"] = "郝楼砂场"
+    assert engine._detect_missing_params(intent, "生成郝楼砂场的报告", None) == []
+
+
+def test_detect_missing_params_without_schema_support(tmp_path):
+    """无 _get_tool_parameters 的旧 executor 不因 schema 基线崩溃（向后兼容）。"""
+    plan = [TaskStep(step_id=1, action="生成报告", tool="caisha_report_tool",
+                     params={}, reasoning="", expected_output="")]
+    intent = _make_intent(plan=plan)
+    engine, store, exe = _make_engine(tmp_path, intent)
+    assert engine._detect_missing_params(intent, "msg", None) == []

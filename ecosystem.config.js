@@ -14,8 +14,10 @@ module.exports = {
       env: {
         // 灰度开关：on=新 RunEngine 路径，off=旧 execute_stream 路径（回退用）
         RUN_ENGINE: 'on',
+        // 知识库确定性检索：1=纯混合检索（向量+BM25 RRF→精排，无 LLM 随机性），0=Agent Search 分级迭代
+        KB_DETERMINISTIC: '1',
       },
-      max_memory_restart: '1G',
+      max_memory_restart: '4G',
       time: true,
     },
     {

@@ -6,6 +6,8 @@ import httpx
 from typing import Dict, Any, Union
 from qwen_agent.tools.base import BaseTool, register_tool
 
+from core import db_schema as DB
+
 logger = logging.getLogger(__name__)
 
 
@@ -100,7 +102,7 @@ class MapTool(BaseTool):
         {
             'name': 'color_expression',
             'type': 'string',
-            'description': 'SQL 颜色表达式（load_vector_layer 使用）。若涉及超深判定，必须使用规则："CASE WHEN (Control_Elevation - Measured_Depth) > 2 THEN \'red\' ELSE \'green\' END"。即：只有实测比控制低 2m 以上才显示红色。',
+            'description': f'SQL 颜色表达式（load_vector_layer 使用）。若涉及超深判定，必须使用规则："CASE WHEN (\\"{DB.CESHEN_CONTROL_ELEVATION}\\" - \\"{DB.CESHEN_MEASURED_DEPTH}\\") > 2 THEN \'red\' ELSE \'green\' END"（字段名必须带双引号）。即：只有实测比控制低 2m 以上才显示红色。',
             'required': False
         },
         {
@@ -136,7 +138,7 @@ class MapTool(BaseTool):
         {
             'name': 'filter',
             'type': 'string',
-            'description': 'SQL 过滤条件，必须使用双引号包裹字段名，例如 "\\"Mineable_Area_Name\\"=\'种子场可采区\'" 或 "\\"Mineable_Area_Name\\" LIKE \'%种子场%\'"。',
+            'description': f'SQL 过滤条件，必须使用双引号包裹字段名，例如 "\\"{DB.CESHEN_AREA_NAME}\\"=\'种子场可采区\'" 或 "\\"{DB.CESHEN_AREA_NAME}\\" LIKE \'%种子场%\'"。',
             'required': False
         }
     ]
@@ -183,7 +185,7 @@ class MapTool(BaseTool):
                     api_url += f"&color_expression={urllib.parse.quote(color_expression)}"
 
                 if filter_query and (not layer_name or layer_name == table_name):
-                    name_match = re.search(r'"Mineable_Area_Name"\s*=\s*\'([^\']+)\'', filter_query)
+                    name_match = re.search(rf'"{DB.CESHEN_AREA_NAME}"\s*=\s*\'([^\']+)\'', filter_query)
                     if name_match:
                         layer_name = name_match.group(1).strip()
 
@@ -323,8 +325,15 @@ class MapTool(BaseTool):
                 'map_command': None
             }
 
+LOCATION_FLY_HEIGHT = 10000
+
 # 地理位置数据库，用于地名查询
 LOCATION_DATABASE = {
+    # 项目本地重点区域：郏县北汝河实景三维测区（坐标取自 3D Tiles 数据集根包围盒中心，
+    # 无 TIANDITU_TOKEN 时也能离线解析该地名）
+    '郏县北汝河': {'lat': 33.9252, 'lng': 113.2905, 'name': '郏县北汝河'},
+    '北汝河': {'lat': 33.9252, 'lng': 113.2905, 'name': '北汝河'},
+    '郏县': {'lat': 33.9252, 'lng': 113.2905, 'name': '郏县'},
     # 中国主要城市
     '北京': {'lat': 39.9042, 'lng': 116.4074, 'name': '北京'},
     '天安门': {'lat': 39.9043, 'lng': 116.4074, 'name': '天安门广场'},
@@ -401,6 +410,14 @@ class LocationSearchTool(BaseTool):
                             'lat': value['lat'],
                             'lng': value['lng'],
                             'zoom': 13
+                        },
+                        # 3D 视图消费：Cesium 相机飞行到同一坐标
+                        'cesium_command': {
+                            'type': 'flyTo',
+                            'lat': value['lat'],
+                            'lng': value['lng'],
+                            'height': LOCATION_FLY_HEIGHT,
+                            'duration': 3
                         }
                     }
             
@@ -433,6 +450,14 @@ class LocationSearchTool(BaseTool):
                                         'lat': lat,
                                         'lng': lng,
                                         'zoom': 14
+                                    },
+                                    # 3D 视图消费：Cesium 相机飞行到同一坐标
+                                    'cesium_command': {
+                                        'type': 'flyTo',
+                                        'lat': lat,
+                                        'lng': lng,
+                                        'height': LOCATION_FLY_HEIGHT,
+                                        'duration': 3
                                     }
                                 }
                         else:

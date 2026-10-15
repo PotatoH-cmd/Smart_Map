@@ -8,6 +8,7 @@ import re
 from typing import Dict, List, Any, Optional, Union
 from qwen_agent.tools.base import BaseTool, register_tool
 from decimal import Decimal  # 在文件顶部添加
+from core import db_schema as DB
 from .schema_manager import SchemaManager
 try:
     import psycopg2
@@ -62,7 +63,7 @@ class PostgreSQLTool(BaseTool):
         {
             'name': 'spatial_table',
             'type': 'string',
-            'description': '要查询的空间数据表名（仅 spatial_query 需要），如 ceshen',
+            'description': f'要查询的空间数据表名（仅 spatial_query 需要），如 {DB.TABLE_CESHEN}',
             'required': False
         },
         {
@@ -104,7 +105,7 @@ class PostgreSQLTool(BaseTool):
             return False
 
         try:
-            host = self.cfg.get('host', '172.136.16.52')
+            host = self.cfg.get('host') or os.environ.get('GEOSERVER_PG_HOST', '172.136.16.52')
             port = self.cfg.get('port', 5432)
             database = self.cfg.get('database', 'postgres')
             user = self.cfg.get('user', 'postgres')
@@ -228,6 +229,10 @@ class PostgreSQLTool(BaseTool):
                 if self.conn:
                     with self.conn.cursor() as cur:
                         sql = self._auto_quote_sql(sql)
+                        # psycopg2 会把 SQL 中的 % 解析为参数占位符；params 为空列表时，
+                        # 含 % 的 SQL（如 LIKE '%xx%'）会抛 IndexError。空参数传 None 跳过解析。
+                        if not params:
+                            params = None
                         cur.execute(sql, params)
                         
                         # 返回全部数据，让下游（报告/可视化/统计）基于完整数据集计算。
@@ -255,7 +260,10 @@ class PostgreSQLTool(BaseTool):
                 logger.warning(f"Database connection issue on attempt {attempt + 1}: {e}")
                 self._connect() # 强制重连
             except IndexError as e:
-                return {'success': True, 'data': [], 'message': '查询成功，返回 0 条记录。'}
+                # 历史兜底曾把此类错误吞成"成功 0 条"，导致上游把查询失败误判为无数据。
+                # 如实上报，避免"查询成功但无可用要素"的假象。
+                logger.warning(f"Query params mismatch (IndexError): {e}")
+                return {'success': False, 'error': f'查询参数与占位符不匹配: {e}', 'data': None}
             except Exception as e:
                 if self.conn:
                     try:

@@ -42,7 +42,7 @@ class SchemaManager:
     # ── 初始化 ──────────────────────────────────────────────
     def __init__(self, db_cfg: Dict[str, Any]):
         self._db_cfg = {
-            "host": db_cfg.get("host", "172.136.16.52"),
+            "host": db_cfg.get("host") or os.environ.get("GEOSERVER_PG_HOST", "172.136.16.52"),
             "port": db_cfg.get("port", 5432),
             "database": db_cfg.get("database", "postgres"),
             "user": db_cfg.get("user", "postgres"),

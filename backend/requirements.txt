@@ -186,3 +186,9 @@ yarl==1.20.0
 llama-index>=0.12.0
 llama-index-embeddings-dashscope>=0.3.0
 llama-index-graph-stores-kuzu>=0.4.0  # 知识图谱（嵌入式图数据库）
+langfuse==4.15.1
+
+# ── Milvus 向量库（KB_VECTOR_BACKEND=milvus 时必需）──
+# 服务端为 Milvus 2.4.x standalone（docker，19530）；kb_milvus 包基于其原生 API：
+# partition key(project) / 稀疏向量(jieba+BM25) / hybrid_search RRF / INVERTED 索引
+pymilvus>=2.4.0

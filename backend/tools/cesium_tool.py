@@ -11,6 +11,8 @@ import re
 from typing import Dict, Any, Union
 from qwen_agent.tools.base import BaseTool, register_tool
 
+from core import db_schema as DB
+
 logger = logging.getLogger(__name__)
 
 
@@ -43,7 +45,7 @@ class CesiumTool(BaseTool):
                 '  addPolygon - 在3D地图上绘制多边形（需要coordinates）\n'
                 '  addPolyline - 在3D地图上绘制折线（需要coordinates）\n'
                 '  addHeatmap - 添加热力图（需要points数据）\n'
-                '  addDepthColumns - 加载测深点3D风险柱。若用户指定了采区名称（如"种子场可采区"），必须传filter参数过滤，格式："Mineable_Area_Name"=\'采区名\'；不指定则加载全部\n'
+                f'  addDepthColumns - 加载测深点3D风险柱。若用户指定了采区名称（如"种子场可采区"），必须传filter参数过滤，格式："{DB.CESHEN_AREA_NAME}"=\'采区名\'；不指定则加载全部\n'
                 '  load3dTiles - 加载3D Tiles倾斜摄影/建筑（需要url）\n'
                 '  loadTerrain - 加载地形服务（需要url）'
             ),
@@ -106,7 +108,7 @@ class CesiumTool(BaseTool):
         {
             'name': 'filter',
             'type': 'string',
-            'description': 'SQL 过滤条件，需使用双引号包裹字段名，例如 "\\"Mineable_Area_Name\\"=\'种子场可采区\'"',
+            'description': f'SQL 过滤条件，需使用双引号包裹字段名，例如 "\\"{DB.CESHEN_AREA_NAME}\\"=\'种子场可采区\'"',
             'required': False
         },
         {
@@ -262,7 +264,7 @@ class CesiumTool(BaseTool):
                 # 从过滤条件中提取图层名
                 if filter_query and (not layer_name or layer_name == table_name):
                     name_match = re.search(
-                        r'"Mineable_Area_Name"\s*=\s*\'([^\']+)\'', filter_query
+                        rf'"{DB.CESHEN_AREA_NAME}"\s*=\s*\'([^\']+)\'', filter_query
                     )
                     if name_match:
                         layer_name = name_match.group(1).strip()
@@ -365,15 +367,15 @@ class CesiumTool(BaseTool):
 
             # ===== addDepthColumns：加载测深点3D风险柱 =====
             elif action == 'addDepthColumns':
-                table_name = params.get('table_name', 'ceshen')
+                table_name = params.get('table_name', DB.TABLE_CESHEN)
                 layer_name = params.get('name') or params.get('title') or '测深风险柱'
                 geom_col = params.get('geom_col', 'geom')
                 filter_query = params.get('filter', '')
                 threshold = params.get('threshold', 2)
                 height_scale = params.get('height_scale', 45)
                 properties = (
-                    'Mineable_Area_Name,County_District,Measured_Depth,'
-                    'Control_Elevation,Lon_4326,Lat_4326,Year,Mineable_Area_ID'
+                    f'{DB.CESHEN_AREA_NAME},{DB.CESHEN_COUNTY},{DB.CESHEN_MEASURED_DEPTH},'
+                    f'{DB.CESHEN_CONTROL_ELEVATION},{DB.CESHEN_LON},{DB.CESHEN_LAT},{DB.CESHEN_YEAR},{DB.CESHEN_AREA_ID}'
                 )
 
                 # 兜底：若 LLM 忘传 filter 但 name/title 里含"可采区"，自动提取并补 filter
@@ -381,13 +383,13 @@ class CesiumTool(BaseTool):
                     area_match = re.search(r'([\u4e00-\u9fa5a-zA-Z0-9_]+可采区)', layer_name)
                     if area_match:
                         area_name = area_match.group(1)
-                        filter_query = f'"Mineable_Area_Name"=\'{area_name}\''
+                        filter_query = DB.quote(DB.CESHEN_AREA_NAME) + f"='{area_name}'"
                         logger.info(f'[CesiumTool] 自动补充 filter: {filter_query}')
 
                 # 从 filter 回填 layer_name
                 if filter_query and (not layer_name or layer_name == '测深风险柱'):
                     name_match = re.search(
-                        r'"Mineable_Area_Name"\s*=\s*\'([^\']+)\'', filter_query
+                        rf'"{DB.CESHEN_AREA_NAME}"\s*=\s*\'([^\']+)\'', filter_query
                     )
                     if name_match:
                         layer_name = f"{name_match.group(1).strip()}测深风险柱"

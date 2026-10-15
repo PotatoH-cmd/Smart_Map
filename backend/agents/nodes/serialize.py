@@ -197,6 +197,7 @@ class OutputSerializationMixin:
             "cesium_commands": final_state.get("cesium_commands", []),
             "charts": final_state.get("charts", []),
             "report_url": final_state.get("report_url"),
+            "sources": final_state.get("kb_sources", []),
             "intent_info": self._serialize_intent_info(intent_result),
             "requires_confirmation": intent_result.requires_confirmation if intent_result else False,
         }

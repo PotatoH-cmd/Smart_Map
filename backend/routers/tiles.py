@@ -12,6 +12,7 @@ from fastapi.responses import StreamingResponse, JSONResponse, Response, FileRes
 import re
 import psycopg2
 from tools.postgresql_tool import PostgreSQLTool  # /api/vector-data 动态矢量加载
+from core import db_schema as DB  # 表/字段名单一来源
 import shutil
 import json
 import contextlib
@@ -850,7 +851,12 @@ async def serve_3dtiles_file(key: str, file_path: str):
     )
 # ---------- 卫星影像动态切片（从本地 GeoTIFF 按需渲染，自 main.py 迁入） ----------
 try:
-    from tools.satellite_tile_service import get_satellite_tile, get_tile_bounds_4326, tiles_in_bounds
+    from tools.satellite_tile_service import (
+        get_satellite_tile, get_tile_bounds_4326, tiles_in_bounds,
+        register_source as _sat_register_source,
+        unregister_source as _sat_unregister_source,
+        list_sources as _sat_list_sources,
+    )
     _satellite_tile_available = True
     logger.info("satellite tile service loaded")
 except Exception as _e:
@@ -858,16 +864,24 @@ except Exception as _e:
     logger.warning("satellite tile service NOT available: %s", _e)
 
 
+class SatelliteSourceRegisterRequest(BaseModel):
+    key: str
+    path: str
+    label: str = ""
+
+
 @router.get("/api/satellite_tile/{z}/{x}/{y}.png")
-async def satellite_tile(z: int, x: int, y: int):
+async def satellite_tile(z: int, x: int, y: int, key: str = "default"):
     if not _satellite_tile_available:
         raise HTTPException(status_code=503, detail="satellite tile service not available")
+    if not re.match(r"^[A-Za-z0-9_-]+$", key):
+        raise HTTPException(status_code=400, detail=f"非法的数据源 key: {key}")
     if z < 0 or z > 22:
         raise HTTPException(status_code=400, detail="invalid zoom")
     n = 1 << z
     if x < 0 or x >= n or y < 0 or y >= n:
         raise HTTPException(status_code=400, detail="invalid tile xy")
-    png = get_satellite_tile(z, x, y)
+    png = get_satellite_tile(z, x, y, key=key)
     if png is None:
         return Response(status_code=204)
     return Response(
@@ -875,6 +889,42 @@ async def satellite_tile(z: int, x: int, y: int):
         media_type="image/png",
         headers={"Cache-Control": "public, max-age=3600", "Access-Control-Allow-Origin": "*"},
     )
+
+
+@router.get("/api/satellite_tile/sources")
+async def satellite_tile_sources():
+    """列出所有已注册的卫星影像数据源。"""
+    if not _satellite_tile_available:
+        raise HTTPException(status_code=503, detail="satellite tile service not available")
+    return JSONResponse(content={"success": True, "sources": _sat_list_sources()})
+
+
+@router.post("/api/satellite_tile/register")
+async def satellite_tile_register(req: SatelliteSourceRegisterRequest):
+    """注册一个本地 GeoTIFF 数据源，key 作为瓦片 URL 的标识。"""
+    if not _satellite_tile_available:
+        raise HTTPException(status_code=503, detail="satellite tile service not available")
+    try:
+        info = _sat_register_source(req.key, req.path, req.label)
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return JSONResponse(content={"success": True, "source": info})
+
+
+@router.delete("/api/satellite_tile/{key}")
+async def satellite_tile_delete(key: str):
+    """注销一个卫星影像数据源（默认源不可注销）。"""
+    if not _satellite_tile_available:
+        raise HTTPException(status_code=503, detail="satellite tile service not available")
+    try:
+        removed = _sat_unregister_source(key)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    if not removed:
+        raise HTTPException(status_code=404, detail=f"数据源不存在: {key}")
+    return JSONResponse(content={"success": True, "key": key})
 @router.get("/proxy/gf2023-tiles/{z}/{y}/{x}")
 async def proxy_gf2023_tiles(z: int, y: int, x: int):
     """代理 2023年高分影像 GF_202308_cache 瓦片 (ArcGIS MapServer)"""
@@ -935,7 +985,7 @@ async def get_mvt_tile(
     z: int,
     x: int,
     y: int,
-    table_name: str = "ceshen",
+    table_name: str = DB.TABLE_CESHEN,
     geom_col: str = "geom",
     properties: str = None,
     filter: str = None
@@ -1074,11 +1124,11 @@ async def get_vector_data(
     :param filter: SQL 过滤条件 (WHERE 后的内容，如 "name='xxx'")
     :param color_expression: SQL 颜色表达式，例如 "CASE WHEN depth < 10 THEN 'red' ELSE 'blue' END"
     """
-    # 兼容性处理：如果请求的是旧表名 mineable_areas，自动映射到新表 ceshen
+    # 兼容性处理：如果请求的是旧表名 mineable_areas，自动映射到新表（测深表）
     target_table = table_name.strip().lower()
     if target_table == 'mineable_areas' or target_table == '"mineable_areas"':
-        logger.info(f"Redirecting table_name from '{table_name}' to 'ceshen'")
-        table_name = 'ceshen'
+        logger.info(f"Redirecting table_name from '{table_name}' to '{DB.TABLE_CESHEN}'")
+        table_name = DB.TABLE_CESHEN
 
     try:
         logger.info(f"Vector API request: table_name={table_name}, geom_col={geom_col}, properties={properties}, filter={filter}, color_expression={color_expression}, debug={debug}")
@@ -1088,21 +1138,13 @@ async def get_vector_data(
             raise HTTPException(status_code=400, detail="无效的表名格式")
 
         pg_tool = PostgreSQLTool(cfg={
-            'host': '172.136.16.52',
+            'host': os.environ.get('GEOSERVER_PG_HOST', '172.136.16.52'),
             'port': 5432,
             'database': 'postgres',
             'user': 'postgres',
         })
 
-        # 修复 color_expression 中的字段引用，增加表别名 t. 以避免字段不存在报错
-        safe_color_expression = color_expression
-        if color_expression:
-            # 匹配双引号中的字段名，例如 "Measured_Depth" -> "t"."Measured_Depth"
-            safe_color_expression = re.sub(r'("([a-zA-Z0-9_]+)")', r'"t".\1', color_expression)
-
-        safe_table_name = table_name if table_name.startswith('"') else f'"{table_name}"'
-
-        # 查询目标表实际列名，动态决定是否启用经纬度回退（caiqu/hx 等 jsonb 表无 Lon_4326/Lat_4326 列）
+        # 查询目标表实际列名，动态决定是否启用经纬度回退（caiqu/hx 等 jsonb 表无经纬度列）
         table_cols_lower = {}
         try:
             col_res = pg_tool.call({
@@ -1118,6 +1160,7 @@ async def get_vector_data(
                                     for r in (col_res.get('data') or []) if r.get('column_name')}
         except Exception as e:
             logger.warning(f"Vector API failed to fetch columns for '{table_name}': {e}")
+
         has_lonlat = 'lon_4326' in table_cols_lower and 'lat_4326' in table_cols_lower
         lon_col = table_cols_lower.get('lon_4326') if has_lonlat else None
         lat_col = table_cols_lower.get('lat_4326') if has_lonlat else None
@@ -1128,13 +1171,31 @@ async def get_vector_data(
                 f'                                    ST_SetSRID(ST_MakePoint("{lon_col}", "{lat_col}"), 4326)\n'
             )
 
+        safe_table_name = table_name if table_name.startswith('"') else f'"{table_name}"'
+
+        # 修复 color_expression 中的字段引用，增加表别名 t. 以避免字段不存在报错
+        # 注意：必须在 table_cols_lower 就绪后处理，才能把裸字段名映射到实际列名。
+        safe_color_expression = color_expression
+        if color_expression:
+            # 1) 匹配双引号中的字段名，例如 "实测深度列" -> "t"."实测深度列"
+            safe_color_expression = re.sub(r'("([a-zA-Z0-9_]+)")', r'"t".\1', color_expression)
+            # 2) 裸字段名（无引号）：PG 会折叠为小写，大小写混合列（如 控制高程列）
+            #    将找不到而整表查询失败（优雅降级成空要素）。按表实际列名补引号与别名。
+            for col in table_cols_lower.values():
+                if col and col != col.lower():
+                    safe_color_expression = re.sub(
+                        rf'(?<![\w".]){re.escape(col)}(?![\w"])',
+                        f'"t"."{col}"', safe_color_expression)
+
         # 构建属性 JSON 对象
         if properties:
             props_list = [p.strip() for p in properties.split(',')]
             # 确保关键字段始终包含在内，用于前端 Popup 显示（仅限目标表实际存在的字段）
             essential_fields = [
-                '"Mineable_Area_Name"', '"Measured_Depth"', '"Control_Elevation"',
-                '"Lon_4326"', '"Lat_4326"', '"Year"', '"Mineable_Area_ID"', '"County_District"'
+                DB.quote(DB.CESHEN_AREA_NAME), DB.quote(DB.CESHEN_MEASURED_DEPTH),
+                DB.quote(DB.CESHEN_CONTROL_ELEVATION), DB.quote(DB.CESHEN_LON),
+                DB.quote(DB.CESHEN_LAT), DB.quote(DB.CESHEN_YEAR),
+                DB.quote(DB.CESHEN_AREA_ID), DB.quote(DB.CESHEN_COUNTY),
             ]
             for field in essential_fields:
                 clean_field = field.replace('"', '')
